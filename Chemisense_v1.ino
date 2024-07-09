@@ -1,3 +1,9 @@
+/*
+By Matt Gaidica, PhD
+
+Notes: The native SD library is having trouble with CS assertion so it is being handled manually.
+*/
+
 #include <ADS124S06.h>
 #include <light_CD74HC4067.h>
 #include <Adafruit_Sensor.h>
@@ -8,6 +14,7 @@
 #include <SD.h>
 
 #define SEALEVELPRESSURE_HPA (1013.25)
+#define MUX_DELAY 5 // ms
 
 #define CS_BME_0 13
 #define CS_BME_1 14
@@ -44,7 +51,7 @@ float spec_k[16] = { 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0 
 float ADC_OFFSET = 411;  // default
 bool sdInitialized = false;
 
-SPISettings SPI_SETTINGS_ADS(1000000, MSBFIRST, SPI_MODE1);
+SPISettings SPI_SETTINGS_ADS(500000, MSBFIRST, SPI_MODE1);
 ADS124S06 ads(CS_ADS, SPI_SETTINGS_ADS);
 CD74HC4067 mux_adc(MUX_ADC_0, MUX_ADC_1, MUX_ADC_2, MUX_ADC_3);
 CD74HC4067 mux_cur(MUX_CUR_0, MUX_CUR_1, MUX_CUR_2, MUX_CUR_3);
@@ -85,25 +92,37 @@ void setup() {
   pinMode(FAN_PWM, OUTPUT);
   analogWrite(FAN_PWM, 255);  // 0-255
 
-  // Try initializing SD card up to 5 times
-  // for (int attempt = 0; attempt < 5; attempt++) {
-  //   if (SD.begin(CS_SD, SPI_HALF_SPEED)) {
-  //     sdInitialized = true;
-  //     break;
-  //   } else {
-  //     Serial.print("SD card initialization attempt ");
-  //     Serial.print(attempt + 1);
-  //     Serial.println(" failed.");
-  //     delay(200);  // Wait for 200ms before the next attempt
-  //   }
-  // }
+  // Initialize the ADS124S06 (and SPI)
+  ads.begin();
+  ads.adcStartupRoutine();
+  setupRegisters();
+  // ads.startConversions();
 
-  // if (sdInitialized) {
-  //   Serial.println("SD card initialized.");
-  //   readCalibrationValues();
-  // } else {
-  //   Serial.println("SD card initialization failed after 5 attempts.");
-  // }
+  mux_adc.channel(0);  // Set the channel for mux_adc
+  mux_cur.channel(0);  // Set the channel for mux_cur
+  enableMUX();
+
+  // Try initializing SD card up to 5 times
+  digitalWrite(CS_SD, LOW);
+  for (int attempt = 0; attempt < 5; attempt++) {
+    if (SD.begin(CS_SD, SPI_HALF_SPEED)) {
+      sdInitialized = true;
+      break;
+    } else {
+      Serial.print("SD card initialization attempt ");
+      Serial.print(attempt + 1);
+      Serial.println(" failed.");
+      delay(200);  // Wait for 200ms before the next attempt
+    }
+  }
+
+  if (sdInitialized) {
+    Serial.println("SD card initialized.");
+    readCalibrationValues();
+  } else {
+    Serial.println("SD card initialization failed after 5 attempts.");
+  }
+  digitalWrite(CS_SD, HIGH);
 
   // mux_cur.disable();
   // mux_adc.disable();
@@ -126,22 +145,6 @@ void setup() {
   // bme_board.setIIRFilterSize(BME680_FILTER_SIZE_3);
   // bme_board.setGasHeater(320, 150);  // 320*C for 150 ms
 
-  // Initialize the ADS124S06 (and SPI)
-  ads.begin();
-  ads.adcStartupRoutine();
-  setupRegisters();
-  ads.startConversions();
-
-  mux_adc.channel(0);  // Set the channel for mux_adc
-  mux_cur.channel(0);  // Set the channel for mux_cur
-  enableMUX();
-
-  // dummy reads?
-  int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
-  float R = equivalentResistance(adcValue);
-
-  // runCalibration();
-
   RGBLED('-', 0);
   RGBLED('G', LED_DIM);
 }
@@ -156,17 +159,23 @@ void loop() {
 
       Serial.print("Channel set to: ");
       Serial.println(channel);
-      delay(100);
-
-      int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
+      ads.sendSTART();
+      delay(MUX_DELAY);
+      int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT); // DIRECT
       float R_v = equivalentResistance(adcValue);
     } else {
-      Serial.println("Invalid channel. Enter a number between 0 and 15.");
+      Serial.println("Running calibration...");
+      if (runCalibration()) {
+        readCalibrationValues();
+      }
     }
   }
 }
 
-void readCalibrationValues() {
+bool readCalibrationValues() {
+  bool success = false;
+
+  digitalWrite(CS_SD, LOW);
   File dataFile = SD.open("CAL.TXT");
 
   if (dataFile) {
@@ -207,50 +216,70 @@ void readCalibrationValues() {
     dataFile.close();
     Serial.print("Updated ADC_OFFSET: ");
     Serial.println(ADC_OFFSET);
+    success = true;
   } else {
     Serial.println("Failed to open CAL.TXT for reading.");
   }
+  digitalWrite(CS_SD, HIGH);
+  return success;
 }
 
-void runCalibration() {
-  // Ensure the calibration file is overwritten
-  if (SD.exists("cal.txt")) {
-    SD.remove("cal.txt");
+bool runCalibration() {
+  bool success = false;
+  int32_t adcValues[16];
+  float measuredRValues[16];
+
+  // Sample ADC values for each channel
+  for (int channel = 0; channel < 16; channel++) {
+    // Set the channel for mux_adc and mux_cur
+    mux_adc.channel(channel);
+    mux_cur.channel(channel);
+
+    Serial.print("Sampling channel ");
+    Serial.println(channel);
+
+    ads.sendSTART();
+    delay(MUX_DELAY);
+    // Read the conversion result
+    int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
+    float R = equivalentResistance(adcValue);
+
+    // Store the values in arrays
+    adcValues[channel] = adcValue;
+    measuredRValues[channel] = R;
   }
 
-  File dataFile = SD.open("cal.txt", FILE_WRITE);
+  // Write the sampled data to the SD card
+  digitalWrite(CS_SD, LOW);
+  // Ensure the calibration file is overwritten
+  if (SD.exists("CAL.TXT")) {
+    SD.remove("CAL.TXT");
+  }
+
+  File dataFile = SD.open("CAL.TXT", FILE_WRITE);
 
   if (dataFile) {
     // Write the CSV header
     dataFile.println("channel,measured_ADC_value,measured_R_value");
 
     for (int channel = 0; channel < 16; channel++) {
-      // Set the channel for mux_adc and mux_cur
-      mux_adc.channel(channel);
-      mux_cur.channel(channel);
-
-      Serial.print("Sampling channel ");
-      Serial.println(channel);
-      delay(100);
-
-      // Read the conversion result
-      int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
-      float R = equivalentResistance(adcValue);
-
       // Write the data to the SD card
       dataFile.print(channel);
       dataFile.print(',');
-      dataFile.print(adcValue);
+      dataFile.print(adcValues[channel]);
       dataFile.print(',');
-      dataFile.print(R, 4);
+      dataFile.print(measuredRValues[channel], 4);
       dataFile.println();
     }
 
     dataFile.close();
-    Serial.println("Calibration data saved to cal.txt.");
+    Serial.println("Calibration data saved to CAL.TXT.");
+    success = true;
   } else {
-    Serial.println("Failed to open cal.txt for writing.");
+    Serial.println("Failed to open CAL.TXT for writing.");
   }
+  digitalWrite(CS_SD, HIGH);
+  return success;
 }
 
 // Initialize register values according to datasheet recommendations
@@ -267,6 +296,9 @@ void setupRegisters() {
 
   // Gain setting (PGA): Disable PGA, ensure gain=1
   ads.writeSingleRegister(REG_ADDR_PGA, PGA_DEFAULT);
+
+  // Single-shot conversion (must send start)
+  ads.writeSingleRegister(REG_ADDR_DATARATE, ADS_CONVMODE_SS | ADS_DR_800);
 }
 
 void printBME_sensor() {
