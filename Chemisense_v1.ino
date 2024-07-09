@@ -1,11 +1,11 @@
 #include <ADS124S06.h>
-// #include "HC4067.h"
 #include <light_CD74HC4067.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME680.h>
 #include <WiFiNINA.h>
 #include <utility/wifi_drv.h>
 #include <SPI.h>
+#include <SD.h>
 
 #define SEALEVELPRESSURE_HPA (1013.25)
 
@@ -40,15 +40,218 @@ const float currentSource = 10e-6;  // Current source value (10 microamperes)
 const float fixedResistor = 10000;  // Fixed resistor value (10k ohms)
 const float gain = 25;              // Sensor gain
 uint8_t ADCstatus[1];
+float spec_k[16] = { 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0 };
+float ADC_OFFSET = 411;  // default
+bool sdInitialized = false;
 
 SPISettings SPI_SETTINGS_ADS(1000000, MSBFIRST, SPI_MODE1);
 ADS124S06 ads(CS_ADS, SPI_SETTINGS_ADS);
-// HC4067 mux_adc(MUX_ADC_0, MUX_ADC_1, MUX_ADC_2, MUX_ADC_3, MUX_ADC_EN);
-// HC4067 mux_cur(MUX_CUR_0, MUX_CUR_1, MUX_CUR_2, MUX_CUR_3, MUX_CUR_EN);
 CD74HC4067 mux_adc(MUX_ADC_0, MUX_ADC_1, MUX_ADC_2, MUX_ADC_3);
 CD74HC4067 mux_cur(MUX_CUR_0, MUX_CUR_1, MUX_CUR_2, MUX_CUR_3);
 Adafruit_BME680 bme_sensor(CS_BME_0);
 Adafruit_BME680 bme_board(CS_BME_1);
+
+void setup() {
+  WiFiDrv::pinMode(25, OUTPUT);  //define GREEN LED
+  WiFiDrv::pinMode(26, OUTPUT);  //define RED LED
+  WiFiDrv::pinMode(27, OUTPUT);  //define BLUE LED
+  RGBLED('R', LED_DIM);
+  Serial.begin(9600);
+  delay(2000);  // wait for serial
+
+  // Init GPIO
+  pinMode(CS_BME_0, OUTPUT);
+  pinMode(CS_BME_1, OUTPUT);
+  pinMode(CS_SD, OUTPUT);
+  pinMode(CS_ADS, OUTPUT);
+
+  pinMode(MUX_ADC_EN, OUTPUT);
+  digitalWrite(MUX_ADC_EN, HIGH);
+  pinMode(MUX_ADC_0, OUTPUT);
+  pinMode(MUX_ADC_2, OUTPUT);
+  pinMode(MUX_ADC_1, OUTPUT);
+  pinMode(MUX_ADC_3, OUTPUT);
+
+  pinMode(MUX_CUR_EN, OUTPUT);
+  digitalWrite(MUX_CUR_EN, HIGH);
+  pinMode(MUX_CUR_0, OUTPUT);
+  pinMode(MUX_CUR_1, OUTPUT);
+  pinMode(MUX_CUR_2, OUTPUT);
+  pinMode(MUX_CUR_3, OUTPUT);
+
+  pinMode(SWITCH_0, INPUT_PULLUP);
+  pinMode(SWITCH_1, INPUT_PULLUP);
+  pinMode(SD_DET, INPUT_PULLUP);
+  pinMode(FAN_PWM, OUTPUT);
+  analogWrite(FAN_PWM, 255);  // 0-255
+
+  // Try initializing SD card up to 5 times
+  // for (int attempt = 0; attempt < 5; attempt++) {
+  //   if (SD.begin(CS_SD, SPI_HALF_SPEED)) {
+  //     sdInitialized = true;
+  //     break;
+  //   } else {
+  //     Serial.print("SD card initialization attempt ");
+  //     Serial.print(attempt + 1);
+  //     Serial.println(" failed.");
+  //     delay(200);  // Wait for 200ms before the next attempt
+  //   }
+  // }
+
+  // if (sdInitialized) {
+  //   Serial.println("SD card initialized.");
+  //   readCalibrationValues();
+  // } else {
+  //   Serial.println("SD card initialization failed after 5 attempts.");
+  // }
+
+  // mux_cur.disable();
+  // mux_adc.disable();
+
+  // if (!bme_sensor.begin() || !bme_board.begin()) {
+  //   Serial.println("Could not find both BME680 sensors, check wiring!");
+  //   while (1)
+  //     ;
+  // }
+
+  // Set up oversampling and filter initialization
+  // bme_sensor.setTemperatureOversampling(BME680_OS_8X);
+  // bme_sensor.setHumidityOversampling(BME680_OS_2X);
+  // bme_sensor.setPressureOversampling(BME680_OS_4X);
+  // bme_sensor.setIIRFilterSize(BME680_FILTER_SIZE_3);
+  // bme_sensor.setGasHeater(320, 150);  // 320*C for 150 ms
+  // bme_board.setTemperatureOversampling(BME680_OS_8X);
+  // bme_board.setHumidityOversampling(BME680_OS_2X);
+  // bme_board.setPressureOversampling(BME680_OS_4X);
+  // bme_board.setIIRFilterSize(BME680_FILTER_SIZE_3);
+  // bme_board.setGasHeater(320, 150);  // 320*C for 150 ms
+
+  // Initialize the ADS124S06 (and SPI)
+  ads.begin();
+  ads.adcStartupRoutine();
+  setupRegisters();
+  ads.startConversions();
+
+  mux_adc.channel(0);  // Set the channel for mux_adc
+  mux_cur.channel(0);  // Set the channel for mux_cur
+  enableMUX();
+
+  // dummy reads?
+  int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
+  float R = equivalentResistance(adcValue);
+
+  // runCalibration();
+
+  RGBLED('-', 0);
+  RGBLED('G', LED_DIM);
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');  // Read the input until newline character
+    int channel = input.toInt();                  // Convert the input to an integer
+    if (channel >= 0 && channel <= 15) {
+      mux_adc.channel(channel);  // Set the channel for mux_adc
+      mux_cur.channel(channel);  // Set the channel for mux_cur
+
+      Serial.print("Channel set to: ");
+      Serial.println(channel);
+      delay(100);
+
+      int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
+      float R_v = equivalentResistance(adcValue);
+    } else {
+      Serial.println("Invalid channel. Enter a number between 0 and 15.");
+    }
+  }
+}
+
+void readCalibrationValues() {
+  File dataFile = SD.open("CAL.TXT");
+
+  if (dataFile) {
+    int32_t adcValue;
+    float measuredRValue;
+    float sumADC = 0;
+    int count = 0;
+
+    while (dataFile.available()) {
+      // Read each line of the file
+      String line = dataFile.readStringUntil('\n');
+
+      // Skip the header line
+      if (line.startsWith("channel")) {
+        continue;
+      }
+
+      // Parse the line to extract values
+      int firstComma = line.indexOf(',');
+      int secondComma = line.indexOf(',', firstComma + 1);
+
+      int channel = line.substring(0, firstComma).toInt();
+      adcValue = line.substring(firstComma + 1, secondComma).toInt();
+      measuredRValue = line.substring(secondComma + 1).toFloat();
+
+      // Check if spec_k is 0 for the current channel
+      if (spec_k[channel] == 0) {
+        sumADC += adcValue;
+        count++;
+      }
+    }
+
+    // Calculate the mean ADC value for spec_k == 0
+    if (count > 0) {
+      ADC_OFFSET = sumADC / count;
+    }
+
+    dataFile.close();
+    Serial.print("Updated ADC_OFFSET: ");
+    Serial.println(ADC_OFFSET);
+  } else {
+    Serial.println("Failed to open CAL.TXT for reading.");
+  }
+}
+
+void runCalibration() {
+  // Ensure the calibration file is overwritten
+  if (SD.exists("cal.txt")) {
+    SD.remove("cal.txt");
+  }
+
+  File dataFile = SD.open("cal.txt", FILE_WRITE);
+
+  if (dataFile) {
+    // Write the CSV header
+    dataFile.println("channel,measured_ADC_value,measured_R_value");
+
+    for (int channel = 0; channel < 16; channel++) {
+      // Set the channel for mux_adc and mux_cur
+      mux_adc.channel(channel);
+      mux_cur.channel(channel);
+
+      Serial.print("Sampling channel ");
+      Serial.println(channel);
+      delay(100);
+
+      // Read the conversion result
+      int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
+      float R = equivalentResistance(adcValue);
+
+      // Write the data to the SD card
+      dataFile.print(channel);
+      dataFile.print(',');
+      dataFile.print(adcValue);
+      dataFile.print(',');
+      dataFile.print(R, 4);
+      dataFile.println();
+    }
+
+    dataFile.close();
+    Serial.println("Calibration data saved to cal.txt.");
+  } else {
+    Serial.println("Failed to open cal.txt for writing.");
+  }
+}
 
 // Initialize register values according to datasheet recommendations
 void setupRegisters() {
@@ -92,74 +295,46 @@ void printBME_sensor() {
   Serial.println(" m");
 }
 
-void setup() {
-  WiFiDrv::pinMode(25, OUTPUT);  //define GREEN LED
-  WiFiDrv::pinMode(26, OUTPUT);  //define RED LED
-  WiFiDrv::pinMode(27, OUTPUT);  //define BLUE LED
-  RGBLED('R', LED_DIM);
-  Serial.begin(9600);
-  delay(2000);  // wait for serial
+float equivalentResistance(int32_t adcValue) {
+  Serial.print("ADC Value: ");
+  Serial.print(adcValue);
+  Serial.print(" (-");
+  Serial.print(ADC_OFFSET, 2);
+  Serial.println(")");
 
-  // Init GPIO
-  pinMode(CS_BME_0, OUTPUT);
-  pinMode(CS_BME_1, OUTPUT);
-  pinMode(CS_SD, OUTPUT);
-  pinMode(CS_ADS, OUTPUT);
+  // Calculate the voltage before the gain stage
+  float bufferVoltage = ((adcValue - ADC_OFFSET) * VREF) / ADC_RANGE;
+  Serial.print("ADC Node (V): ");
+  Serial.println(bufferVoltage, 6);
 
-  pinMode(MUX_ADC_EN, OUTPUT);
+  // Calculate the voltage after the gain stage
+  float adcVoltage = bufferVoltage / gain;
+  // Serial.print("Pre-buffer (V): ");
+  // Serial.println(adcVoltage, 6);
+
+  float R_eq = adcVoltage / currentSource;
+  // Serial.print("Equivalent Resistance (R_eq): ");
+  // Serial.println(R_eq, 3);
+
+  float R = 1 / ((1 / R_eq) - (1 / fixedResistor));
+  if (R < 0) {
+    R = 0;
+  }
+  Serial.print("Rv (kOhm): ");
+  Serial.println(R / 1000.0, 3);
+  Serial.println("");
+
+  return R;
+}
+
+void enableMUX() {
+  digitalWrite(MUX_ADC_EN, LOW);
+  digitalWrite(MUX_CUR_EN, LOW);
+}
+
+void disableMUX() {
   digitalWrite(MUX_ADC_EN, HIGH);
-  pinMode(MUX_ADC_0, OUTPUT);
-  pinMode(MUX_ADC_2, OUTPUT);
-  pinMode(MUX_ADC_1, OUTPUT);
-  pinMode(MUX_ADC_3, OUTPUT);
-
-  pinMode(MUX_CUR_EN, OUTPUT);
   digitalWrite(MUX_CUR_EN, HIGH);
-  pinMode(MUX_CUR_0, OUTPUT);
-  pinMode(MUX_CUR_1, OUTPUT);
-  pinMode(MUX_CUR_2, OUTPUT);
-  pinMode(MUX_CUR_3, OUTPUT);
-
-  pinMode(SWITCH_0, INPUT_PULLUP);
-  pinMode(SWITCH_1, INPUT_PULLUP);
-  pinMode(SD_DET, INPUT_PULLUP);
-  pinMode(FAN_PWM, OUTPUT);
-  analogWrite(FAN_PWM, 255);  // 0-255
-
-  // mux_cur.disable();
-  // mux_adc.disable();
-
-  // if (!bme_sensor.begin() || !bme_board.begin()) {
-  //   Serial.println("Could not find both BME680 sensors, check wiring!");
-  //   while (1)
-  //     ;
-  // }
-
-  // Set up oversampling and filter initialization
-  // bme_sensor.setTemperatureOversampling(BME680_OS_8X);
-  // bme_sensor.setHumidityOversampling(BME680_OS_2X);
-  // bme_sensor.setPressureOversampling(BME680_OS_4X);
-  // bme_sensor.setIIRFilterSize(BME680_FILTER_SIZE_3);
-  // bme_sensor.setGasHeater(320, 150);  // 320*C for 150 ms
-  // bme_board.setTemperatureOversampling(BME680_OS_8X);
-  // bme_board.setHumidityOversampling(BME680_OS_2X);
-  // bme_board.setPressureOversampling(BME680_OS_4X);
-  // bme_board.setIIRFilterSize(BME680_FILTER_SIZE_3);
-  // bme_board.setGasHeater(320, 150);  // 320*C for 150 ms
-
-  // Initialize the ADS124S06 (and SPI)
-  ads.begin();
-  ads.adcStartupRoutine();
-  setupRegisters();
-  ads.startConversions();
-  delay(10);
-
-  mux_adc.channel(0);  // Set the channel for mux_adc
-  mux_cur.channel(0);  // Set the channel for mux_cur
-  enableMUX();
-
-  RGBLED('-', 0);
-  RGBLED('G', LED_DIM);
 }
 
 void RGBLED(char RGB, int state) {
@@ -178,81 +353,5 @@ void RGBLED(char RGB, int state) {
       WiFiDrv::analogWrite(26, LOW);
       WiFiDrv::analogWrite(27, LOW);
       break;
-  }
-}
-
-float equivalentResistance(int32_t adcValue) {
-  // Calculate the voltage before the gain stage
-  float bufferVoltage = (adcValue * VREF) / ADC_RANGE;
-  Serial.print("Buffer Voltage (before gain adjustment): ");
-  Serial.println(bufferVoltage, 10);
-
-  // Calculate the voltage after the gain stage
-  float adcVoltage = bufferVoltage / gain;
-  Serial.print("ADC Voltage (after gain adjustment): ");
-  Serial.println(adcVoltage, 10);
-
-  float R_eq = adcVoltage / currentSource;
-  Serial.print("Equivalent Resistance (R_eq): ");
-  Serial.println(R_eq, 10);
-
-  float R_v = 1 / ((1 / R_eq) - (1 / fixedResistor));
-  Serial.print("Rv: ");
-  Serial.println(R_v, 3);
-
-  return R_v;
-}
-
-void enableMUX() {
-  digitalWrite(MUX_ADC_EN, LOW);
-  digitalWrite(MUX_CUR_EN, LOW);
-}
-
-void disableMUX() {
-  digitalWrite(MUX_ADC_EN, HIGH);
-  digitalWrite(MUX_CUR_EN, HIGH);
-}
-
-void loop() {
-  // int channel = 7;
-  // // for (int channel = 0; channel < 16; channel++) {
-  // mux_adc.channel(channel);  // Set the channel for mux_adc
-  // mux_cur.channel(channel);  // Set the channel for mux_cur
-  // delay(100);
-
-  // // Read the conversion result
-  // int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
-  // float R_v = equivalentResistance(adcValue);
-  // // Print the result
-  // // Serial.print("Channel: ");
-  // // Serial.print(channel);
-  // // Serial.print(", ADC: ");
-  // // Serial.print(adcValue);
-  // // Serial.print(", R_v: ");
-  // // Serial.println(R_v, 4);
-  // delay(1000);
-  // // }
-  // Serial.println("");
-
-  // delay(1000);
-
-  if (Serial.available() > 0) {
-    String input = Serial.readStringUntil('\n');  // Read the input until newline character
-    int channel = input.toInt();                  // Convert the input to an integer
-    if (channel >= 0 && channel <= 15) {
-      mux_adc.channel(channel);  // Set the channel for mux_adc
-      mux_cur.channel(channel);  // Set the channel for mux_cur
-
-      Serial.print("Channel set to: ");
-      Serial.println(channel);
-
-      mux_adc.channel(channel);  // Set the channel for mux_adc
-      mux_cur.channel(channel);  // Set the channel for mux_cur
-      delay(100);
-      int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
-      float R_v = equivalentResistance(adcValue);
-    } else {
-      Serial.println("Invalid channel. Enter a number between 0 and 15.");
-    }
   }
 }
