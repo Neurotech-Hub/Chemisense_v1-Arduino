@@ -9,7 +9,8 @@ Performs resistance measuring of 16 channels and ambient sensing with data loggi
 
 Schematic and PCB were designed using KiCad and are available by secure link.
 
-## Initialization (Power-up)
+## Usage
+### Initialization (Power-up)
 The LED will be blue during the following:
 - Initialize serial port (USB)
 - Initialize IO
@@ -18,7 +19,7 @@ The LED will be blue during the following:
 - Initialize SD card
 - Initialize gas sensors
 
-### Usage
+### Operation
 Two buttons provide a non-serial UI:
 1. Black: read all 16 channels and send results to the serial port.
 2. Red: log all data to the SD card.
