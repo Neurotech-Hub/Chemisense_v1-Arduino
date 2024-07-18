@@ -1,4 +1,6 @@
 # Chemisense
+![Chemisense Module](Chemisense_v1_Module.jpg)
+
 Performs resistance measuring of 16 channels and ambient sensing with data logging via:
 - [Arduino MKR WiFi 1010 (MCU)](https://store-usa.arduino.cc/products/arduino-mkr-wifi-1010)
 - [TI ADS124S06 (ADC)](https://www.ti.com/product/ADS124S06)
