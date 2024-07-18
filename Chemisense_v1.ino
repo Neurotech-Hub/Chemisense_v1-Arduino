@@ -241,6 +241,7 @@ void loop() {
 }
 
 void logData() {
+  RGBLED('R', LED_DIM);
   sampleAllChannels();
   readBME_die(false);
   readBME_topside(false);
@@ -293,6 +294,7 @@ void logData() {
     Serial.println("Error opening file.");
   }
   digitalWrite(CS_SD, HIGH);
+  RGBLED('-', 0);
 }
 
 int getNextFileNumber() {
