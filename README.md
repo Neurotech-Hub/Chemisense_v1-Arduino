@@ -11,7 +11,7 @@ Schematic and PCB were designed using KiCad and are available by secure link.
 
 ## Usage
 ### Initialization (Power-up)
-The LED will be blue during the following:
+The LED will be blue during the following (and pulse green afterward):
 - Initialize serial port (USB)
 - Initialize IO
 - Initialize ADC
