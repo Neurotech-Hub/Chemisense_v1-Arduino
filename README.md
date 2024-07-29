@@ -37,6 +37,9 @@ All channels and gas data are logged in CSV format with headers (first row) "key
 ### Calibration
 The calibration utilizes a daughterboard with a known configuration of four 0Ω "shunt" resistors. It reads those channels and removes any offset in the ADC. The offset is saved on SD card in "CAL.TXT, " referenced during initialization.
 
+### Charging
+This module currently uses a very simple battery switch while utilizing the Arduino's charging module. Therefore, to charge the battery, the power switch must by ON.
+
 ## Custom Dependencies
 Clone this to Arduino/libraries:
 - [Neurotech-Hub/ADS124S06-Arduino](https://github.com/Neurotech-Hub/ADS124S06-Arduino)
