@@ -182,9 +182,9 @@ void setup() {
   }
 
   Serial.println("\n-----\nCommands:");
-  Serial.println("0-15: read single channel");
+  Serial.println("0-15: read single channel (and display serially + I2C");
   Serial.println("55 (bottom button): log data");
-  Serial.println("77 (top button): read all channels (and display)");
+  Serial.println("77 (top button): read all channels (and display serially)");
   Serial.println("99: calibrate\n-----");
   RGBLED('-', 0);
 }
