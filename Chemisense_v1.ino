@@ -164,7 +164,7 @@ void setup() {
     Serial.println("SD card initialized.");
     readCalibrationValues();  // !! need to check for unlikely cal values
   } else {
-    Serial.println("SD card initialization failed after 5 attempts.");
+    Serial.println("SD card initialization failed.");
     error = true;
   }
   digitalWrite(CS_SD, HIGH);
