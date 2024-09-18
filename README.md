@@ -30,6 +30,12 @@ All channels and gas data are logged in CSV format with headers (first row) "key
 ### Calibration
 Calibration utilizes one or many log files and fits a linear equation against known calibration values (calibration die). This relationship has been verified to be linear. See: [Chemisensor MATLAB/run_logSensitivity.m](https://github.com/Neurotech-Hub/Chemisensor-MATLAB/blob/main/run_logSensitivity.m).
 
+Note, variables `MATLAB_SLOPE` and `MATLAB_INTERCEPT` should be set to 0 for these files, otherwise, previous calibrations will be applied to the saved data.
+
+The calibration die has been measured using a precision meter; these values are stored on the original SD card and are hardcoded as the variable:
+
+`const float spec_k[16] = { 1.001, 4.695, 10.021, 0.0, 1.002, 4.68, 9.955, 0.0, 0.999, 4.682, 10.016, 0.0, 0.999, 4.685, 9.95, 0.0 };  // measured values, also in B00.txt`
+
 ### Charging
 This module currently uses a very simple battery switch while utilizing the Arduino's charging module. **Therefore, to charge the battery, the power switch must be ON.**
 
