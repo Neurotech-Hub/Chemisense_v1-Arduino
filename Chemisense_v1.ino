@@ -52,14 +52,23 @@ Notes: The native SD library is having trouble with CS assertion so it is being 
 
 char fileName[13];  // Buffer to hold file name in the format "00000.TXT"
 
-const float VREF = 2.5;            // Reference voltage (ADC internal)
-const long ADC_RANGE = 8388607;    // 24-bit ADC range adjusted for unipolar measurement (2^23 - 1)
-float currentSource = 10e-6;       // Current source value (10µA)
-const float fixedResistor = 2200;  // Fixed resistor value
-const float gain = 25;             // Sensor gain
+const float VREF = 2.5;          // Reference voltage (ADC internal)
+const long ADC_RANGE = 8388607;  // 24-bit ADC range adjusted for unipolar measurement (2^23 - 1)
+
+// these would eventually live in EEPROM/SD card, measured w/ precision meter
+const float MATLAB_SLOPE = 1.045742;
+const float MATLAB_INTERCEPT = -7.228576;
+const float SOURCE_CAL_10UA = 10.094e-6;
+const float SOURCE_CAL_50UA = 49.751e-6;
+float currentSource;               // set at init
+const float fixedResistor = 2208;  // Fixed resistor value
+// const float spec_k[16] = { 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0 }; // ideal values
+const float spec_k[16] = { 1.001, 4.695, 10.021, 0.0, 1.002, 4.68, 9.955, 0.0, 0.999, 4.682, 10.016, 0.0, 0.999, 4.685, 9.95, 0.0 };  // measured values, also in B00.txt
+
+const float INA190_GAIN = 25;  // see datasheet
 uint8_t ADCstatus[1];
-const float spec_k[16] = { 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0 };
-float ADC_OFFSET = 253;                      // default
+
+// float ADC_OFFSET = 0;                        // default, can be overwritten using calibration function
 const float ADC_SOURCE_THRESH = VREF - 0.2;  // slightly lower than VREF
 const float SOURCE_MULTIPLIER = 5.0;         // from 10uA to 50uA
 
@@ -94,6 +103,12 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // functions with defaults need declaration for some reason
 void sampleChannels(int channel = -1, bool doDebug = false);
 float calcADS_R(int32_t adcValue, bool debug, bool allowSourceMod = false);
+
+// display controls
+unsigned long previousMillis = 0;  // Store the last time the page was updated
+int currentPage = 0;               // Variable to track the current page (0 or 1)
+const long interval = 4000;        // Interval for page switching (2000 ms)
+bool paginate = false;
 
 void setup() {
   WiFiDrv::pinMode(25, OUTPUT);  //define GREEN LED
@@ -142,6 +157,8 @@ void setup() {
     Serial.println(F("SSD1306 allocation failed"));
     // allow to continue, non-critical aspect
   }
+  delay(1000);  // required for I2C screen to startup
+
   displayText("Hi, Chemisensor v1.1\nNeurotech Hub | MG", 1);
 
   enableMUX();
@@ -162,7 +179,6 @@ void setup() {
   }
   if (sdInitialized) {
     Serial.println("SD card initialized.");
-    readCalibrationValues();  // !! need to check for unlikely cal values
   } else {
     Serial.println("SD card initialization failed.");
     error = true;
@@ -182,10 +198,9 @@ void setup() {
   }
 
   Serial.println("\n-----\nCommands:");
-  Serial.println("0-15: read single channel (and display serially + I2C");
-  Serial.println("55 (bottom button): log data");
-  Serial.println("77 (top button): read all channels (and display serially)");
-  Serial.println("99: calibrate\n-----");
+  Serial.println("0-15: read single channel (and display serial + I2C)");
+  Serial.println("33 (button A): read all channels");
+  Serial.println("55 (button B): log data");
   RGBLED('-', 0);
 }
 
@@ -211,21 +226,13 @@ void loop() {
       sendValueToDisplay(channel);
       // disableMUX();
       // enableMUX();
-    } else if (channel == 99) {
-      Serial.println("\nRunning calibration...");
-      if (runCalibration()) {
-        readCalibrationValues();
-      }
-    } else if (channel == 77) {  // same as SWITH_1 right now
-      sampleChannels();
-      Serial.println();
-      for (int i = 0; i < 16; i++) {
-        Serial.print(i);
-        Serial.print(",");
-        Serial.println(measuredRValues[i], 4);
-      }
+      paginate = false;
+    } else if (channel == 33) {
+      input_showChannels();
+      paginate = true;
     } else if (channel == 55) {
-      logData();
+      input_logData();
+      paginate = false;
     } else {
       Serial.println("Invalid command.");
     }
@@ -233,24 +240,19 @@ void loop() {
   }
 
   if (digitalRead(SWITCH_0) == LOW) {
-    Serial.println("Logging...");
-    logData();
+    input_logData();
     while (digitalRead(SWITCH_0) == LOW) {
       // wait for button to release
     }
+    paginate = false;
   }
 
   if (digitalRead(SWITCH_1) == LOW) {
-    sampleChannels();
-    Serial.println();
-    for (int i = 0; i < 16; i++) {
-      Serial.print(i);
-      Serial.print(",");
-      Serial.println(measuredRValues[i], 4);
-    }
+    input_showChannels();
     while (digitalRead(SWITCH_1) == LOW) {
       // wait for button to release
     }
+    paginate = true;
   }
 
   if (fadeLED == 0 || fadeLED == 100) {
@@ -262,7 +264,69 @@ void loop() {
     fadeLED--;
   }
   RGBLED('G', fadeLED);
+
+  if (paginate) {
+    unsigned long currentMillis = millis();  // Get the current time
+    if (currentMillis - previousMillis >= interval) {
+      previousMillis = currentMillis;  // Save the last time the page was updated
+      // Call the display function with the current page
+      displayChannels(currentPage);
+      // Toggle between page 0 and page 1
+      currentPage = (currentPage == 0) ? 1 : 0;
+    }
+  }
+
   delay(10);
+}
+
+// void input_runCal() {
+//   Serial.println("\nRunning calibration...");
+//   displayText("CAL", 2);
+//   if (runCalibration()) {
+//     readCalibrationValues();  // recalculates ADC_OFFSET
+//   }
+// }
+void input_showChannels() {
+  sampleChannels();
+  for (int i = 0; i < 16; i++) {
+    Serial.print(i);
+    Serial.print(",");
+    Serial.println(measuredRValues[i], 4);
+  }
+  currentPage = 0;
+}
+void input_logData() {
+  Serial.println("Logging...");
+  displayText("Logging...", 2);
+  logData();
+  displayText(fileName, 2);
+}
+
+void displayChannels(int page) {
+  display.clearDisplay();               // Clear the display
+  display.setTextSize(1);               // Use smaller text to fit more information
+  display.setTextColor(SSD1306_WHITE);  // Set text color
+
+  // Determine the starting and ending channels based on the page
+  int startChannel = (page == 0) ? 0 : 8;
+  int endChannel = startChannel + 8;
+
+  // Loop through the selected set of channels (either 0-7 or 8-15)
+  for (int i = startChannel; i < endChannel; i++) {
+    char buffer[20];  // Buffer to hold the formatted string for each channel
+    snprintf(buffer, sizeof(buffer), "%02d:%.1f", i + 1, measuredRValues[i]);
+
+    // Adjust cursor position for each channel
+    if ((i - startChannel) < 4) {
+      // First 4 channels go in the left column
+      display.setCursor(0, (i - startChannel) * 8);  // Set row for left column
+    } else {
+      // Last 4 channels go in the right column
+      display.setCursor(64, (i - startChannel - 4) * 8);  // Set row for right column
+    }
+    display.write(buffer);  // Write the buffer to the screen
+  }
+  display.display();  // Render everything to the screen
 }
 
 void displayText(const char* message, int textSize) {
@@ -377,17 +441,18 @@ void sampleChannels(int channel, bool doDebug) {
     int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
     float R = calcADS_R(adcValue, doDebug, true);
 
+    // test for return flag
     if (R == -1.0) {
-      Serial.println("Increasing source from 10uA to 50uA.");
+      // Serial.println("Increasing source from 10uA to 50uA.");
       ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_50);  // increase for low R's
-      currentSource = 50e-6;
+      currentSource = SOURCE_CAL_50UA;
       delay(MUX_DELAY);  // settle
       ads.sendSTART();
       delay(START_DELAY);
       adcValue = ads.readConvertedData(ADCstatus, DIRECT);
       R = calcADS_R(adcValue, doDebug, false);                    // overwrite, disallow source modification
       ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_10);  // reset to default
-      currentSource = 10e-6;
+      currentSource = SOURCE_CAL_10UA;
     }
 
     // Store the values in arrays
@@ -396,62 +461,62 @@ void sampleChannels(int channel, bool doDebug) {
   }
 }
 
-bool readCalibrationValues() {
-  bool success = false;
+// bool readCalibrationValues() {
+//   bool success = false;
 
-  digitalWrite(CS_SD, LOW);
-  File dataFile = SD.open("CAL.TXT");
+//   digitalWrite(CS_SD, LOW);
+//   File dataFile = SD.open("CAL.TXT");
 
-  if (dataFile) {
-    int32_t adcValue;
-    float measuredRValue;
-    float sumADC = 0;
-    int count = 0;
+//   if (dataFile) {
+//     int32_t adcValue;
+//     float measuredRValue;
+//     float sumADC = 0;
+//     int count = 0;
 
-    while (dataFile.available()) {
-      // Read each line of the file
-      String line = dataFile.readStringUntil('\n');
+//     while (dataFile.available()) {
+//       // Read each line of the file
+//       String line = dataFile.readStringUntil('\n');
 
-      // Skip the header line
-      if (line.startsWith("channel")) {
-        continue;
-      }
+//       // Skip the header line
+//       if (line.startsWith("channel")) {
+//         continue;
+//       }
 
-      // Parse the line to extract values
-      int firstComma = line.indexOf(',');
-      int secondComma = line.indexOf(',', firstComma + 1);
+//       // Parse the line to extract values
+//       int firstComma = line.indexOf(',');
+//       int secondComma = line.indexOf(',', firstComma + 1);
 
-      int channel = line.substring(0, firstComma).toInt();
-      adcValue = line.substring(firstComma + 1, secondComma).toInt();
-      measuredRValue = line.substring(secondComma + 1).toFloat();
+//       int channel = line.substring(0, firstComma).toInt();
+//       adcValue = line.substring(firstComma + 1, secondComma).toInt();
+//       measuredRValue = line.substring(secondComma + 1).toFloat();
 
-      // Check if spec_k is 0 for the current channel
-      if (spec_k[channel] == 0) {
-        sumADC += adcValue;
-        count++;
-      }
-    }
+//       // Check if spec_k is 0 for the current channel
+//       if (spec_k[channel] == 0) {
+//         sumADC += adcValue;
+//         count++;
+//       }
+//     }
 
-    // Calculate the mean ADC value for spec_k == 0
-    if (count > 0) {
-      float storedOffset = sumADC / count;
-      if (abs(storedOffset) < 1000) {
-        ADC_OFFSET = storedOffset;
-      } else {
-        Serial.println("SD card ADC_OFFSET out of range.");
-      }
-    }
+//     // Calculate the mean ADC value for spec_k == 0
+//     if (count > 0) {
+//       float storedOffset = sumADC / count;
+//       if (abs(storedOffset) < 1000) {
+//         ADC_OFFSET = storedOffset;
+//       } else {
+//         Serial.println("SD card ADC_OFFSET out of range.");
+//       }
+//     }
 
-    dataFile.close();
-    success = true;
-  } else {
-    Serial.println("Failed to open CAL.TXT for reading.");
-  }
-  Serial.print("ADC_OFFSET: ");
-  Serial.println(ADC_OFFSET);
-  digitalWrite(CS_SD, HIGH);
-  return success;
-}
+//     dataFile.close();
+//     success = true;
+//   } else {
+//     Serial.println("Failed to open CAL.TXT for reading.");
+//   }
+//   Serial.print("ADC_OFFSET: ");
+//   Serial.println(ADC_OFFSET);
+//   digitalWrite(CS_SD, HIGH);
+//   return success;
+// }
 
 bool runCalibration() {
   bool success = false;
@@ -495,17 +560,15 @@ bool runCalibration() {
 void configureADS() {
   // Set the internal reference voltage
   ads.writeSingleRegister(REG_ADDR_REF, ADS_REFSEL_INT | ADS_REFINT_ON_ALWAYS);
-
   // Set the IDAC current to 10µA on the AIN0 pin
   ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_10);  // ADS_IDACMAG_10, ADS_IDACMAG_50
-  ads.writeSingleRegister(REG_ADDR_IDACMUX, ADS_IDAC1_A0 | ADS_IDAC2_OFF);
+  currentSource = SOURCE_CAL_10UA;
 
+  ads.writeSingleRegister(REG_ADDR_IDACMUX, ADS_IDAC1_A0 | ADS_IDAC2_OFF);
   // Set the input multiplexer to measure AIN1 referenced to AINCOM
   ads.writeSingleRegister(REG_ADDR_INPMUX, ADS_P_AIN1 | ADS_N_AINCOM);
-
   // Gain setting (PGA): Disable PGA, ensure gain=1
   ads.writeSingleRegister(REG_ADDR_PGA, PGA_DEFAULT);
-
   // Single-shot conversion (must send start hereon)
   ads.writeSingleRegister(REG_ADDR_DATARATE, ADS_CONVMODE_SS | ADS_DR_4000);
 }
@@ -594,20 +657,22 @@ void readBME_topside(bool debug) {
 
 float calcADS_R(int32_t adcValue, bool debug, bool allowSourceMod) {
   // after INA190 gain
-  float ADCNode = ((adcValue - ADC_OFFSET) * VREF) / ADC_RANGE;
+  float ADCNode = (adcValue * VREF) / ADC_RANGE;
   if (ADCNode * SOURCE_MULTIPLIER < ADC_SOURCE_THRESH && allowSourceMod) {
     return -1.0;  // flag for current source modification
   }
   // get voltage drop before gain
-  float voltageDrop = ADCNode / gain;
+  float voltageDrop = ADCNode / INA190_GAIN;
   // Ohm's Law
   float R_eq = voltageDrop / currentSource;
   // account for voltage divider
   float R = 1 / ((1 / R_eq) - (1 / fixedResistor));
+  // apply calibration
+  R = MATLAB_SLOPE * R + MATLAB_INTERCEPT;
 
   // fix negative, can occur at low R's due to offset
   if (R < 0.0) {
-    Serial.println("R < 0, valid only for small R's.");
+    // Serial.println("R < 0, valid only for small R's.");
     R = 0.0;
   }
 
@@ -617,9 +682,6 @@ float calcADS_R(int32_t adcValue, bool debug, bool allowSourceMod) {
 
     Serial.print("ADC Value: ");
     Serial.print(adcValue);
-    Serial.print(" (-");
-    Serial.print(ADC_OFFSET, 2);
-    Serial.println(")");
 
     Serial.print("ADC Node (V): ");
     Serial.println(ADCNode, 6);
