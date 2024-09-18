@@ -42,3 +42,6 @@ This module currently uses a very simple battery switch while utilizing the Ardu
 ## Custom Dependencies
 Clone this to Arduino/libraries:
 - [Neurotech-Hub/ADS124S06-Arduino](https://github.com/Neurotech-Hub/ADS124S06-Arduino)
+
+## Notes
+- The I2C screen unfortunately ties to the 5V (USB power) line on the Arduino via the provided cable. A 3.3V line was manually soldered to allow for operation on battery.
