@@ -22,21 +22,13 @@ The LED will be blue during the following (and pulse green afterward):
 - Initialize gas sensors
 
 ### Operation
-Two buttons provide a non-serial UI:
-1. Black: read all 16 channels and send results to the serial port.
-2. Red: log all data to the SD card.
-
-Serial commands (newline terminated):
-- 0-15: reads an individual channel
-- 55: log data
-- 99: perform calibration
+See serial output at init (or inspect setup()) for user inputs.
 
 ### Data Logging
 All channels and gas data are logged in CSV format with headers (first row) "key,value". Reference [Neurotech-Hub/Chemisensor-MATLAB](https://github.com/Neurotech-Hub/Chemisensor-MATLAB) for reading these data in MATLAB.
 
 ### Calibration
-The calibration utilizes a daughterboard with a known configuration of four 0Ω "shunt" resistors. It reads those channels and removes any offset in the ADC. The offset is saved on the SD card in "CAL.TXT, "which is referenced during initialization. If calibration is run without the shunt resistors, it will save bad values and affect subsequent readings.
-- [ ] Implement smarter calibration features: check for ~0Ω values
+Calibration utilizes one or many log files and fits a linear equation against known calibration values (calibration die). This relationship has been verified to be linear. See: [Chemisensor MATLAB/run_logSensitivity.m](https://github.com/Neurotech-Hub/Chemisensor-MATLAB/blob/main/run_logSensitivity.m).
 
 ### Charging
 This module currently uses a very simple battery switch while utilizing the Arduino's charging module. **Therefore, to charge the battery, the power switch must be ON.**
