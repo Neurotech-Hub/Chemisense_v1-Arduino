@@ -3,7 +3,6 @@ By Matt Gaidica, PhD
 
 Notes: The native SD library is having trouble with CS assertion so it is being handled manually.
 */
-// [ ] Calibrate current sources
 
 #include <ADS124S06.h>
 #include <light_CD74HC4067.h>
@@ -16,6 +15,7 @@ Notes: The native SD library is having trouble with CS assertion so it is being 
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <BQ24195.h>  // [MKR WiFi 1010 Battery Application Note | Arduino Documentation](https://docs.arduino.cc/tutorials/mkr-wifi-1010/mkr-battery-app-note/)
 
 #define SEALEVELPRESSURE_HPA (1013.25)
 #define MUX_DELAY 1    // ms
@@ -62,8 +62,9 @@ const float SOURCE_CAL_10UA = 10.094e-6;
 const float SOURCE_CAL_50UA = 49.751e-6;
 float currentSource;               // set at init
 const float fixedResistor = 2208;  // Fixed resistor value
-// const float spec_k[16] = { 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0 }; // ideal values
-const float spec_k[16] = { 1.001, 4.695, 10.021, 0.0, 1.002, 4.68, 9.955, 0.0, 0.999, 4.682, 10.016, 0.0, 0.999, 4.685, 9.95, 0.0 };  // measured values, also in B00.txt
+// ideal values: { 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0, 1, 4.7, 10, 0 };
+const float calDie_00[16] = { 1001.0, 4695.0, 10021.0, 0.0, 1002.0, 4680.0, 9955.0, 0.0, 999.0, 4682.0, 10016.0, 0.0, 999.0, 4685.0, 9950.0, 0.0 };  // measured values, also in B00.txt
+const float caleDie_01[16] = {997.5, 2202.1, 4698.3, 10019.0, 46917.0, 100240.0, 469660.0, 1003450.0, 998.3, 2201.0, 4696.0, 9998.5, 46825.0, 99725.0, 470620.0, 9989800.0}; // B01.txt
 
 const float INA190_GAIN = 25;  // see datasheet
 uint8_t ADCstatus[1];
@@ -110,14 +111,23 @@ int currentPage = 0;               // Variable to track the current page (0 or 1
 const long interval = 4000;        // Interval for page switching (2000 ms)
 bool paginate = false;
 
+// PMIC/battery
+int R1 = 330000;
+int R2 = 1000000;
+float rawADC;
+float voltADC;
+float voltBat;
+int max_Source_voltage;           // upper source voltage for the battery
+float batteryFullVoltage = 4.2;   //upper voltage limit for battery
+float batteryEmptyVoltage = 3.5;  //lower voltage limit for battery
+float batteryCapacity = 2.2;      //set battery capacity in Ah
+int percentCharged = 0;
+
 void setup() {
   WiFiDrv::pinMode(25, OUTPUT);  //define GREEN LED
   WiFiDrv::pinMode(26, OUTPUT);  //define RED LED
   WiFiDrv::pinMode(27, OUTPUT);  //define BLUE LED
   RGBLED('B', LED_DIM);
-  Serial.begin(9600);
-  delay(2000);  // wait for serial
-  Serial.println("\n\n***Hello, Chemisensor.***");
 
   // Init GPIO
   pinMode(CS_BME_0, OUTPUT);
@@ -147,6 +157,10 @@ void setup() {
   pinMode(FAN_PWM, OUTPUT);
   analogWrite(FAN_PWM, 255);  // 0-255
 
+  Serial.begin(9600);
+  delay(2000);  // wait for serial
+  Serial.println("\n\n***Hello, Chemisensor.***");
+
   // Initialize the ADS124S06 (and SPI)
   ads.begin();
   ads.adcStartupRoutine();
@@ -159,7 +173,25 @@ void setup() {
   }
   delay(1000);  // required for I2C screen to startup
 
-  displayText("Hi, Chemisensor v1.1\nNeurotech Hub | MG", 1);
+  //configure BQ24195 PMIC
+  analogReference(AR_DEFAULT);  // Arduino
+  analogReadResolution(12);     // Arduino
+  max_Source_voltage = (3.3 * (R1 + R2)) / R2;
+  PMIC.begin();                                       // start the PMIC I2C connection
+  PMIC.enableBoostMode();                             // boost battery output to 5V
+  PMIC.setMinimumSystemVoltage(batteryEmptyVoltage);  // set the minimum battery output to 3.5V
+  PMIC.setChargeVoltage(batteryFullVoltage);          // set battery voltage at full charge
+  PMIC.setChargeCurrent(batteryCapacity / 2);         // set battery current to C/2 in amps
+  PMIC.enableCharge();  // enable charging of battery
+  checkBattery();
+  if (percentCharged > 0) {
+    char initBuffer[64];  // Create a buffer large enough to hold the formatted string
+    snprintf(initBuffer, sizeof(initBuffer), "Hi, Chemisensor v1.1\nNeurotech Hub | MG\nCharge: %d%%", percentCharged);
+    displayText(initBuffer, 1);
+  } else {
+    displayText("Hi, Chemisensor v1.1\nNeurotech Hub | MG\nNo Battery (turn ON)", 1);
+  }
+
 
   enableMUX();
   mux_adc.channel(0);  // Set the channel for mux_adc
@@ -490,14 +522,14 @@ void sampleChannels(int channel, bool doDebug) {
 //       adcValue = line.substring(firstComma + 1, secondComma).toInt();
 //       measuredRValue = line.substring(secondComma + 1).toFloat();
 
-//       // Check if spec_k is 0 for the current channel
-//       if (spec_k[channel] == 0) {
+//       // Check if calDie_00 is 0 for the current channel
+//       if (calDie_00[channel] == 0) {
 //         sumADC += adcValue;
 //         count++;
 //       }
 //     }
 
-//     // Calculate the mean ADC value for spec_k == 0
+//     // Calculate the mean ADC value for calDie_00 == 0
 //     if (count > 0) {
 //       float storedOffset = sumADC / count;
 //       if (abs(storedOffset) < 1000) {
@@ -724,4 +756,18 @@ void RGBLED(char RGB, int state) {
       WiFiDrv::analogWrite(27, LOW);
       break;
   }
+}
+
+void checkBattery() {
+  rawADC = analogRead(ADC_BATTERY);                //the value obtained directly at the PB09 input pin
+  voltADC = rawADC * (3.3 / 4095.0);               //convert ADC value to the voltage read at the pin
+  voltBat = voltADC * (max_Source_voltage / 3.3);  //we cannot use map since it requires int inputs/outputs
+
+  percentCharged = (voltBat - batteryEmptyVoltage) * (100) / (batteryFullVoltage - batteryEmptyVoltage);  //custom float friendly map function
+
+  Serial.print("VBATT = ");
+  Serial.print(voltBat);
+  Serial.print("V, ");
+  Serial.print(percentCharged);
+  Serial.println("% charged");
 }
