@@ -11,37 +11,113 @@ Performs resistance measuring of 16 channels and ambient sensing with data loggi
 
 Schematic and PCB were designed using KiCad and are available by secure link.
 
-## Usage
-### Initialization (Power-up)
-The LED will be blue during the following (and pulse green afterward):
-- Initialize serial port (USB)
-- Initialize IO
-- Initialize ADC
-- Initialize MUX and enable
-- Initialize SD card
-- Initialize gas sensors
+## Quick Start
+1. Power on the device (LED will pulse green when ready)
+2. Connect via serial terminal at 9600 baud
+3. Type `help` to see available commands
+4. Try a single measurement: `sample 0,1,2`
+5. Start continuous measurements: `init rate_limit=min;sample_average=10;channels=0,1,2;start`
 
-### Operation
-See serial output at init (or inspect setup()) for user inputs.
+## Detailed Usage
+### Power-Up Sequence
+When powered on, the LED will show:
+- **Blue**: During initialization
+- **Pulsing Green**: Ready for commands
+- **Pulsing Red**: Error condition
+
+The initialization sequence includes:
+1. Serial port (USB)
+2. IO configuration
+3. ADC setup
+4. MUX enabling
+5. SD card check
+6. Gas sensors setup
+
+### Command Interface
+The device accepts commands through the serial port (9600 baud). There are two types of sampling commands:
+
+#### 1. Single Sample Commands
+```
+sample 0              # Sample only channel 0
+sample 0,1,2         # Sample channels 0, 1, and 2
+sample all           # Sample all channels (0-15)
+```
+- Takes one measurement using current averaging settings
+- Returns results immediately
+- Format: `CH:VALUE,CH:VALUE,...` (e.g., `0:123.45,1:234.56`)
+
+#### 2. Continuous Sampling Commands
+```
+# Full configuration with immediate start:
+init rate_limit=min;sample_average=10;channels=0,1,2;start
+
+# Or configure and start separately:
+init rate_limit=1;sample_average=10;channels=0,1,2
+start
+
+# Stop continuous sampling:
+stop
+```
+
+Configuration Parameters:
+- `rate_limit`: Time between measurements
+  - `min`: As fast as possible
+  - `1`: One second between measurements
+  - `0.5`: Half second between measurements
+  - etc.
+- `sample_average`: Number of samples to average (1-255)
+  - Higher values: More stable readings, slower updates
+  - Lower values: Faster updates, more noise
+- `channels`: Which channels to measure
+  - Individual: `0,1,2`
+  - All: `all`
+
+#### 3. Utility Commands
+```
+show     # Display current values for all channels
+log      # Save all channel values to SD card
+help     # Show command help
+```
+
+### Output Formats
+All measurements are output in the format:
+```
+CH:VALUE,CH:VALUE,...
+
+Example:
+0:123.4567,1:234.5678,2:345.6789
+```
+- CH: Channel number (0-15)
+- VALUE: Resistance in ohms (4 decimal places)
 
 ### Data Logging
-All channels and gas data are logged in CSV format with headers (first row) "key,value". Reference [Neurotech-Hub/Chemisensor-MATLAB](https://github.com/Neurotech-Hub/Chemisensor-MATLAB) for reading these data in MATLAB.
+The `log` command saves data to the SD card:
+- Files are numbered sequentially (00000.TXT, 00001.TXT, etc.)
+- CSV format with "key,value" header
+- Includes all channel measurements and gas sensor data
+- Use [Neurotech-Hub/Chemisensor-MATLAB](https://github.com/Neurotech-Hub/Chemisensor-MATLAB) for data analysis
 
-### Calibration
-Calibration utilizes one or many log files and fits a linear equation against known calibration values (calibration die). This relationship has been verified to be linear. See: [Chemisensor MATLAB/run_logSensitivity.m](https://github.com/Neurotech-Hub/Chemisensor-MATLAB/blob/main/run_logSensitivity.m).
+### Performance Notes
+The device uses optimized timing for stability:
+- MUX switching: 50ms
+- ADC conversion: 15ms
+- Current source: 85ms
+- Round delay: 25ms
+- Channel delay: 2ms
 
-Note, variables `MATLAB_SLOPE` and `MATLAB_INTERCEPT` should be set to 0 for these files, otherwise, previous calibrations will be applied to the saved data.
-
-The calibration die has been measured using a precision meter; these values are stored on the original SD card and are hardcoded as the variable:
-
-`const float spec_k[16] = { 1.001, 4.695, 10.021, 0.0, 1.002, 4.68, 9.955, 0.0, 0.999, 4.682, 10.016, 0.0, 0.999, 4.685, 9.95, 0.0 };  // measured values, also in B00.txt`
+These timings balance measurement speed and accuracy. For best results:
+1. Allow system to warm up for 5 minutes
+2. Use `sample_average=10` or higher for stable readings
+3. Channel 0 has a known reference resistor for drift compensation
 
 ### Charging
-This module currently uses a very simple battery switch while utilizing the Arduino's charging module. **Therefore, to charge the battery, the power switch must be ON.**
+**Important:** The power switch must be ON to charge the battery. This is due to the simple battery switch design utilizing the Arduino's charging module.
 
 ## Custom Dependencies
-Clone this to Arduino/libraries:
+Required library (clone to Arduino/libraries):
 - [Neurotech-Hub/ADS124S06-Arduino](https://github.com/Neurotech-Hub/ADS124S06-Arduino)
 
-## Notes
-- The I2C screen unfortunately ties to the 5V (USB power) line on the Arduino via the provided cable. A 3.3V line was manually soldered to allow for operation on battery.
+## Hardware Notes
+- The I2C screen is modified with a 3.3V line for battery operation
+- Channel 0 has a precision reference resistor
+- Measurement stability includes thermal and reference drift compensation

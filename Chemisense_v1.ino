@@ -17,25 +17,58 @@ Notes: The native SD library is having trouble with CS assertion so it is being 
 #include <Adafruit_SSD1306.h>
 #include <BQ24195.h> // [MKR WiFi 1010 Battery Application Note | Arduino Documentation](https://docs.arduino.cc/tutorials/mkr-wifi-1010/mkr-battery-app-note/)
 
+// Command definitions
+#define MAX_CMD_LENGTH 64
+#define MAX_CHANNELS 16
+#define MAX_TOKENS 10
+
+// Command strings
+const char *CMD_INIT = "init";     // Initialize sampling configuration
+const char *CMD_START = "start";   // Start continuous sampling
+const char *CMD_STOP = "stop";     // Stop continuous sampling
+const char *CMD_SAMPLE = "sample"; // Sample specific channel(s)
+const char *CMD_SHOW = "show";     // Show all channel values
+const char *CMD_LOG = "log";       // Log data to SD card
+const char *CMD_RESET = "reset";   // Reset reference compensation
+const char *CMD_DIAG = "diag";     // Run diagnostic test
+const char *CMD_TEST = "test";     // Run isolation test
+const char *CMD_HELP = "help";     // Show command help
+
+// Sampling configuration structure
+struct SamplingConfig
+{
+  uint8_t numSamples;                   // Samples to average per channel (1-255)
+  uint32_t rateLimit;                   // Minimum ms between outputs (0 = fast as possible)
+  bool isRunning;                       // Sampling state
+  uint8_t activeChannels[MAX_CHANNELS]; // 1 = active, 0 = inactive
+  uint8_t numActiveChannels;            // Count of active channels
+};
+
+// Global sampling configuration
+SamplingConfig samplingConfig = {
+    .numSamples = 10,      // Default to 10 samples
+    .rateLimit = 0,        // Default to fast as possible
+    .isRunning = false,    // Start stopped
+    .activeChannels = {0}, // All channels inactive
+    .numActiveChannels = 0};
+
+// No legacy commands needed - using new text commands only
+
 #define SEALEVELPRESSURE_HPA (1013.25)
-#define MUX_DELAY 10            // ms - increased from 1ms for better MUX settling
-#define START_DELAY 10          // ms - increased from 5ms for better ADC settling
-#define CURRENT_SOURCE_DELAY 50 // ms - new: dedicated delay for current source changes
+#define MUX_DELAY 50            // ms - increased to reduce MUX switching variability
+#define START_DELAY 15          // ms - balanced for speed vs stability
+#define CURRENT_SOURCE_DELAY 85 // ms - optimized based on consistent performance
 
-// Sample Averaging Configuration - More samples = better repeatability but slower measurements
-#define SAMPLES_PER_CHANNEL 3 // Number of samples to average per channel (1-20 recommended)
-                              // 1 = no averaging (fastest)
-                              // 5 = good balance of speed/precision
-                              // 10+ = high precision (slow)
+// Sampling Configuration
+#define ROUND_DELAY_MS 25  // ms - reduced to minimize drift effects between rounds
+#define CHANNEL_DELAY_MS 2 // ms - keeping this minimal delay between channels
 
-// Reference Drift Compensation - Since diagnostic shows ADC/reference drift is the main issue
-#define USE_REFERENCE_COMPENSATION 1 // 1 = compensate for reference drift, 0 = disable
-                                     // Takes initial reading as reference to subtract drift
+// Reference compensation is critical given observed drift
+#define REFERENCE_CHECK_INTERVAL 5000 // ms - how often to update reference
+#define REFERENCE_CHANNEL 0           // use channel 0 (known resistor) as reference
 
-// Sampling Strategy - How to distribute samples across time
-#define USE_TIME_DISTRIBUTED_SAMPLING 1 // 1 = sample all channels N times (round-robin)
-                                        // 0 = sample each channel N times sequentially
-                                        // Time-distributed better captures drift variation
+// Reference and sampling configuration
+// Using time-distributed sampling with reference drift compensation for optimal stability
 
 #define CS_BME_0 13
 #define CS_BME_1 14
@@ -150,6 +183,251 @@ float batteryFullVoltage = 4.2;  // upper voltage limit for battery
 float batteryEmptyVoltage = 3.5; // lower voltage limit for battery
 float batteryCapacity = 2.2;     // set battery capacity in Ah
 int percentCharged = 0;
+
+// Command parsing functions
+void parseChannels(const char *channelStr)
+{
+  // Reset active channels
+  memset(samplingConfig.activeChannels, 0, MAX_CHANNELS);
+  samplingConfig.numActiveChannels = 0;
+
+  // Handle 'all' keyword
+  if (strncmp(channelStr, "all", 3) == 0)
+  {
+    for (int i = 0; i < MAX_CHANNELS; i++)
+    {
+      samplingConfig.activeChannels[i] = 1;
+    }
+    samplingConfig.numActiveChannels = MAX_CHANNELS;
+    return;
+  }
+
+  // Parse comma-separated list
+  char *str = strdup(channelStr); // Make a copy since strtok modifies string
+  char *token = strtok(str, ",");
+
+  while (token != NULL && samplingConfig.numActiveChannels < MAX_CHANNELS)
+  {
+    int channel = atoi(token);
+    if (channel >= 0 && channel < MAX_CHANNELS)
+    {
+      samplingConfig.activeChannels[channel] = 1;
+      samplingConfig.numActiveChannels++;
+    }
+    token = strtok(NULL, ",");
+  }
+
+  free(str);
+}
+
+void parseInitCommand(const char *cmd)
+{
+  char cmdCopy[MAX_CMD_LENGTH];
+  strncpy(cmdCopy, cmd, MAX_CMD_LENGTH - 1);
+  cmdCopy[MAX_CMD_LENGTH - 1] = '\0';
+
+  char *savePtr2;
+  char *token = strtok_r(cmdCopy, ";", &savePtr2);
+  while (token != NULL)
+  {
+    // Trim leading/trailing spaces
+    while (isspace(*token))
+      token++;
+    char *end = token + strlen(token) - 1;
+    while (end > token && isspace(*end))
+      end--;
+    *(end + 1) = 0;
+
+    if (strncmp(token, "rate_limit=", 11) == 0)
+    {
+      char *value = token + 11;
+      if (strcmp(value, "min") == 0)
+      {
+        samplingConfig.rateLimit = 0; // Run as fast as possible
+      }
+      else
+      {
+        // Convert seconds to milliseconds
+        samplingConfig.rateLimit = atol(value) * 1000;
+      }
+    }
+    else if (strncmp(token, "sample_average=", 14) == 0)
+    {
+      char *value = token + 14;
+      int samples = atoi(value);
+
+      if (samples > 0 && samples <= 255)
+      {
+        samplingConfig.numSamples = samples;
+      }
+      else
+      {
+        Serial.println("Warning: sample_average out of range (1-255)");
+      }
+    }
+    else if (strncmp(token, "channels=", 9) == 0)
+    {
+      parseChannels(token + 9);
+    }
+    else if (strcmp(token, "start") == 0)
+    {
+      samplingConfig.isRunning = true;
+    }
+
+    token = strtok_r(NULL, ";", &savePtr2);
+  }
+
+  // Print final configuration once
+  Serial.println("\n=== Configuration ===");
+  Serial.print("Rate limit: ");
+  Serial.print(samplingConfig.rateLimit);
+  Serial.println("ms");
+  Serial.print("Sample average: ");
+  Serial.println(samplingConfig.numSamples);
+  Serial.print("Active channels: ");
+  for (int i = 0; i < MAX_CHANNELS; i++)
+  {
+    if (samplingConfig.activeChannels[i])
+    {
+      Serial.print(i);
+      Serial.print(" ");
+    }
+  }
+  Serial.println();
+  Serial.print("Sampling: ");
+  Serial.println(samplingConfig.isRunning ? "started" : "stopped");
+  Serial.println("==================\n");
+}
+
+void processCommand(const char *cmd)
+{
+  // Trim leading/trailing whitespace
+  while (isspace(*cmd))
+    cmd++;
+
+  // Extract the base command (everything before first space)
+  char baseCmd[MAX_CMD_LENGTH];
+  int i = 0;
+  while (cmd[i] && !isspace(cmd[i]) && i < MAX_CMD_LENGTH - 1)
+  {
+    baseCmd[i] = tolower(cmd[i]); // Convert to lowercase for case-insensitive comparison
+    i++;
+  }
+  baseCmd[i] = '\0';
+
+  // Get the parameters (everything after first space)
+  const char *params = cmd[i] ? &cmd[i + 1] : "";
+  while (isspace(*params))
+    params++; // Skip leading spaces in parameters
+
+  // Process commands
+  if (strcmp(baseCmd, CMD_INIT) == 0)
+  {
+    parseInitCommand(params);
+  }
+  else if (strcmp(baseCmd, CMD_START) == 0)
+  {
+    samplingConfig.isRunning = true;
+    Serial.println("Sampling started");
+  }
+  else if (strcmp(baseCmd, CMD_STOP) == 0)
+  {
+    samplingConfig.isRunning = false;
+    Serial.println("Sampling stopped");
+  }
+  else if (strcmp(baseCmd, CMD_SAMPLE) == 0)
+  {
+    // Sample specific channels: "sample 0" or "sample 0,1,2" or "sample all"
+    if (*params)
+    {
+      // Clear any previous channel configuration
+      memset(samplingConfig.activeChannels, 0, MAX_CHANNELS);
+      samplingConfig.numActiveChannels = 0;
+
+      // Parse the channels
+      parseChannels(params);
+
+      // Take one set of samples with current configuration
+      bool first = true;
+      for (int ch = 0; ch < MAX_CHANNELS; ch++)
+      {
+        if (samplingConfig.activeChannels[ch])
+        {
+          sampleChannels(ch, false);
+          // Output in format: CH:VALUE,CH:VALUE,...
+          if (!first)
+            Serial.print(",");
+          Serial.print(ch);
+          Serial.print(":");
+          Serial.print(measuredRValues[ch], 4);
+          first = false;
+        }
+      }
+      if (!first)
+        Serial.println();
+    }
+    else
+    {
+      Serial.println("Error: Please specify channel(s) to sample (e.g., 'sample 0' or 'sample 0,1,2' or 'sample all')");
+    }
+  }
+  else if (strcmp(baseCmd, CMD_SHOW) == 0)
+  {
+    input_showChannels();
+    paginate = true;
+  }
+  else if (strcmp(baseCmd, CMD_LOG) == 0)
+  {
+    input_logData();
+    paginate = false;
+  }
+  else if (strcmp(baseCmd, CMD_RESET) == 0)
+  {
+    Serial.println("Resetting reference compensation...");
+    referenceSet = false;
+    referenceReading = 0;
+    Serial.println("Reference reset. Next measurement will set new reference.");
+  }
+  else if (strcmp(baseCmd, CMD_DIAG) == 0)
+  {
+    diagnoseMeasurementVariation(0);
+  }
+  else if (strcmp(baseCmd, CMD_TEST) == 0)
+  {
+    isolateVariationSource(0);
+  }
+  else if (strcmp(baseCmd, CMD_HELP) == 0)
+  {
+    showHelp();
+  }
+  else
+  {
+    Serial.println("Unknown command. Type 'help' for available commands.");
+  }
+}
+
+void showHelp()
+{
+  Serial.println("\n=== Available Commands ===");
+  Serial.println("Configuration:");
+  Serial.println("  init rate_limit=min;sample_average=N;channels=0,1,2,3;start");
+  Serial.println("  Example 1: init rate_limit=min;sample_average=10;channels=0,1,2;start");
+  Serial.println("  Example 2: init rate_limit=1;sample_average=10;channels=0,1,2;start  (1 sec between updates)");
+  Serial.println("\nBasic Commands:");
+  Serial.println("  start - Begin continuous sampling");
+  Serial.println("  stop - Stop continuous sampling");
+  Serial.println("  sample [channels] - Sample specific channels (e.g., 'sample 0,1,2' or 'sample all')");
+  Serial.println("  show - Show all channel values");
+  Serial.println("  log - Log data to SD card");
+  Serial.println("\nMaintenance Commands:");
+  Serial.println("  reset - Reset reference compensation");
+  Serial.println("  diag - Run diagnostic test");
+  Serial.println("  test - Run isolation test");
+  Serial.println("  help - Show this help message");
+  Serial.println("\nOutput Format:");
+  Serial.println("  CH:VALUE,CH:VALUE,... (e.g., 0:123.45,1:234.56)");
+  Serial.println("======================\n");
+}
 
 void setup()
 {
@@ -271,14 +549,7 @@ void setup()
     readBME_topside(true);
   }
 
-  Serial.println("\n-----\nCommands:");
-  Serial.println("0-15: read single channel (and display serial + I2C)");
-  Serial.println("33 (button A): read all channels");
-  Serial.println("55 (button B): log data");
-  Serial.println("77: reset reference compensation");
-  Serial.println("66: toggle sampling method (time-distributed vs sequential)");
-  Serial.println("99: diagnostic test - analyze measurement variation");
-  Serial.println("88: isolation test - identify variation source");
+  Serial.println("\nType 'help' for available commands.");
   RGBLED('-', 0);
 }
 
@@ -295,70 +566,62 @@ void loop()
     }
   }
 
-  if (Serial.available() > 0)
+  static uint32_t lastSampleTime = 0;
+  static char cmdBuffer[MAX_CMD_LENGTH];
+  static uint8_t cmdIndex = 0;
+
+  // Handle serial commands
+  while (Serial.available() > 0)
   {
-    RGBLED('-', 0);
-    RGBLED('B', LED_DIM);
-    String input = Serial.readStringUntil('\n'); // Read the input until newline character
-    int channel = input.toInt();                 // Convert the input to an integer
-    if (channel >= 0 && channel <= 15)
+    char c = Serial.read();
+
+    if (c == '\n' || c == '\r')
     {
-      Serial.print("\nSampling channel ");
-      Serial.println(channel);
-      sampleChannels(channel, true);
-      sendValueToDisplay(channel);
-      // disableMUX();
-      // enableMUX();
-      paginate = false;
+      if (cmdIndex > 0)
+      {
+        cmdBuffer[cmdIndex] = '\0';
+        processCommand(cmdBuffer);
+        cmdIndex = 0;
+      }
     }
-    else if (channel == 33)
+    else if (cmdIndex < MAX_CMD_LENGTH - 1)
     {
-      input_showChannels();
-      paginate = true;
+      cmdBuffer[cmdIndex++] = c;
     }
-    else if (channel == 55)
-    {
-      input_logData();
-      paginate = false;
-    }
-    else if (channel == 77)
-    {
-      Serial.println("Resetting reference compensation...");
-      referenceSet = false;
-      referenceReading = 0;
-      Serial.println("Reference reset. Next measurement will set new reference.");
-      paginate = false;
-    }
-    else if (channel == 66)
-    {
-#if USE_TIME_DISTRIBUTED_SAMPLING
-      Serial.println("Currently using: TIME-DISTRIBUTED sampling");
-      Serial.println("To switch to sequential: change USE_TIME_DISTRIBUTED_SAMPLING to 0 and recompile");
-#else
-      Serial.println("Currently using: SEQUENTIAL sampling");
-      Serial.println("To switch to time-distributed: change USE_TIME_DISTRIBUTED_SAMPLING to 1 and recompile");
-#endif
-      paginate = false;
-    }
-    else if (channel == 99)
-    {
-      Serial.println("Running diagnostic test on channel 0...");
-      diagnoseMeasurementVariation(0);
-      paginate = false;
-    }
-    else if (channel == 88)
-    {
-      Serial.println("Running isolation test on channel 0...");
-      isolateVariationSource(0);
-      paginate = false;
-    }
-    else
-    {
-      Serial.println("Invalid command.");
-    }
-    RGBLED('-', 0);
   }
 
+  // Handle continuous sampling if enabled
+  if (samplingConfig.isRunning)
+  {
+    uint32_t now = millis();
+    uint32_t elapsed = now - lastSampleTime;
+
+    if (elapsed >= samplingConfig.rateLimit)
+    {
+      // Sample all active channels
+      bool first = true;
+      for (int ch = 0; ch < MAX_CHANNELS; ch++)
+      {
+        if (samplingConfig.activeChannels[ch])
+        {
+          sampleChannels(ch, false);
+          // Output in format: CH:VALUE,CH:VALUE,...
+          if (!first)
+            Serial.print(",");
+          Serial.print(ch);
+          Serial.print(":");
+          Serial.print(measuredRValues[ch], 4);
+          first = false;
+        }
+      }
+      if (!first)
+        Serial.println(); // Only print newline if we output something
+
+      lastSampleTime = now;
+    }
+  }
+
+  // Handle button inputs (preserved from original code)
   if (digitalRead(SWITCH_0) == LOW)
   {
     input_logData();
@@ -395,13 +658,11 @@ void loop()
 
   if (paginate)
   {
-    unsigned long currentMillis = millis(); // Get the current time
+    unsigned long currentMillis = millis();
     if (currentMillis - previousMillis >= interval)
     {
-      previousMillis = currentMillis; // Save the last time the page was updated
-      // Call the display function with the current page
+      previousMillis = currentMillis;
       displayChannels(currentPage);
-      // Toggle between page 0 and page 1
       currentPage = (currentPage == 0) ? 1 : 0;
     }
   }
@@ -577,29 +838,13 @@ void sampleChannels(int channel, bool doDebug)
     endChannel = channel + 1;
   }
 
-#if USE_TIME_DISTRIBUTED_SAMPLING
-  // Time-distributed sampling: sample all channels round-robin N times
-  // This spreads samples across time to better capture drift variation
-
   // Initialize accumulator arrays
   long adcSums[16] = {0};
   int validSampleCounts[16] = {0};
 
-  if (doDebug)
+  // Take numSamples rounds, sampling all channels each round
+  for (int sample = 0; sample < samplingConfig.numSamples; sample++)
   {
-    Serial.println("Using time-distributed sampling...");
-  }
-
-  // Take SAMPLES_PER_CHANNEL rounds, sampling all channels each round
-  for (int sample = 0; sample < SAMPLES_PER_CHANNEL; sample++)
-  {
-    if (doDebug && SAMPLES_PER_CHANNEL > 1)
-    {
-      Serial.print("=== Sample Round ");
-      Serial.print(sample + 1);
-      Serial.println(" ===");
-    }
-
     for (int ch = startChannel; ch < endChannel; ch++)
     {
       // Set the channel for mux_adc and mux_cur
@@ -614,25 +859,14 @@ void sampleChannels(int channel, bool doDebug)
       adcSums[ch] += adcValue;
       validSampleCounts[ch]++;
 
-      // Show individual sample values when debugging single channel
-      if (doDebug && (endChannel - startChannel == 1))
-      {
-        Serial.print("Ch");
-        Serial.print(ch);
-        Serial.print(" Round ");
-        Serial.print(sample + 1);
-        Serial.print(": ");
-        Serial.println(adcValue);
-      }
-
       // Small delay between channels in same round
-      delay(2);
+      delay(CHANNEL_DELAY_MS);
     }
 
     // Longer delay between rounds to capture drift
-    if (sample < SAMPLES_PER_CHANNEL - 1)
+    if (sample < samplingConfig.numSamples - 1)
     {
-      delay(100); // 100ms between rounds
+      delay(ROUND_DELAY_MS);
     }
   }
 
@@ -641,33 +875,17 @@ void sampleChannels(int channel, bool doDebug)
   {
     int32_t avgAdcValue = adcSums[ch] / validSampleCounts[ch];
 
-#if USE_REFERENCE_COMPENSATION
     // Apply reference drift compensation
     if (!referenceSet && ch == startChannel)
     {
       // Set reference on first channel of first measurement
       referenceReading = avgAdcValue;
       referenceSet = true;
-      if (doDebug)
-      {
-        Serial.print("Reference set to: ");
-        Serial.println(referenceReading);
-      }
     }
 
     // Compensate for reference drift by using reference as baseline
     int32_t compensatedValue = avgAdcValue;
-    if (doDebug && ch == startChannel)
-    {
-      Serial.print("Raw: ");
-      Serial.print(avgAdcValue);
-      Serial.print(", Compensated: ");
-      Serial.println(compensatedValue);
-    }
     float R = calcADS_R(compensatedValue, doDebug, true);
-#else
-    float R = calcADS_R(avgAdcValue, doDebug, true);
-#endif
 
     // Handle 50µA current source switching if needed
     if (R == -1.0)
@@ -681,7 +899,7 @@ void sampleChannels(int channel, bool doDebug)
       long adcSum50ua = 0;
       int validSamples50ua = 0;
 
-      for (int sample = 0; sample < SAMPLES_PER_CHANNEL; sample++)
+      for (int sample = 0; sample < samplingConfig.numSamples; sample++)
       {
         mux_adc.channel(ch);
         mux_cur.channel(ch);
@@ -694,20 +912,15 @@ void sampleChannels(int channel, bool doDebug)
         adcSum50ua += adcValue50ua;
         validSamples50ua++;
 
-        if (sample < SAMPLES_PER_CHANNEL - 1)
+        if (sample < samplingConfig.numSamples - 1)
         {
-          delay(100); // Same timing as main sampling
+          delay(ROUND_DELAY_MS);
         }
       }
 
       avgAdcValue = adcSum50ua / validSamples50ua;
-
-#if USE_REFERENCE_COMPENSATION
       int32_t compensated50ua = avgAdcValue;
       R = calcADS_R(compensated50ua, doDebug, false);
-#else
-      R = calcADS_R(avgAdcValue, doDebug, false);
-#endif
 
       // Reset to 10µA
       ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_10);
@@ -719,123 +932,6 @@ void sampleChannels(int channel, bool doDebug)
     adcValues[ch] = avgAdcValue;
     measuredRValues[ch] = R;
   }
-
-#else
-  // Original channel-sequential sampling for comparison
-  for (int ch = startChannel; ch < endChannel; ch++)
-  {
-    // Set the channel for mux_adc and mux_cur
-    mux_adc.channel(ch);
-    mux_cur.channel(ch);
-    delay(MUX_DELAY);
-
-    // Take multiple samples and average them for better repeatability
-    long adcSum = 0;
-    int validSamples = 0;
-
-    for (int sample = 0; sample < SAMPLES_PER_CHANNEL; sample++)
-    {
-      ads.sendSTART();
-      delay(START_DELAY);
-
-      int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
-      adcSum += adcValue;
-      validSamples++;
-
-      // Show individual sample values when debugging single channel
-      if (doDebug && SAMPLES_PER_CHANNEL > 1)
-      {
-        Serial.print("Sample ");
-        Serial.print(sample + 1);
-        Serial.print(": ");
-        Serial.println(adcValue);
-      }
-
-      // Small delay between samples to avoid interference
-      if (sample < SAMPLES_PER_CHANNEL - 1)
-      {
-        delay(2);
-      }
-    }
-
-    // Calculate average ADC value
-    int32_t avgAdcValue = adcSum / validSamples;
-
-#if USE_REFERENCE_COMPENSATION
-    // Apply reference drift compensation
-    if (!referenceSet && ch == startChannel)
-    {
-      // Set reference on first channel of first measurement
-      referenceReading = avgAdcValue;
-      referenceSet = true;
-      if (doDebug)
-      {
-        Serial.print("Reference set to: ");
-        Serial.println(referenceReading);
-      }
-    }
-
-    // Compensate for reference drift by using reference as baseline
-    int32_t compensatedValue = avgAdcValue;
-    if (doDebug && ch == startChannel)
-    {
-      Serial.print("Raw: ");
-      Serial.print(avgAdcValue);
-      Serial.print(", Compensated: ");
-      Serial.println(compensatedValue);
-    }
-    float R = calcADS_R(compensatedValue, doDebug, true);
-#else
-    float R = calcADS_R(avgAdcValue, doDebug, true);
-#endif
-
-    // test for return flag
-    if (R == -1.0)
-    {
-      // Serial.println("Increasing source from 10uA to 50uA.");
-      ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_50); // increase for low R's
-      currentSource = SOURCE_CAL_50UA;
-      delay(CURRENT_SOURCE_DELAY); // settle after current source change
-
-      // Take multiple samples with 50µA current source and average
-      adcSum = 0;
-      validSamples = 0;
-
-      for (int sample = 0; sample < SAMPLES_PER_CHANNEL; sample++)
-      {
-        ads.sendSTART();
-        delay(START_DELAY);
-
-        int32_t adcValue50ua = ads.readConvertedData(ADCstatus, DIRECT);
-        adcSum += adcValue50ua;
-        validSamples++;
-
-        // Small delay between samples
-        if (sample < SAMPLES_PER_CHANNEL - 1)
-        {
-          delay(2);
-        }
-      }
-
-      avgAdcValue = adcSum / validSamples;
-
-#if USE_REFERENCE_COMPENSATION
-      // Apply same compensation for 50µA readings
-      int32_t compensated50ua = avgAdcValue;
-      R = calcADS_R(compensated50ua, doDebug, false);
-#else
-      R = calcADS_R(avgAdcValue, doDebug, false); // overwrite, disallow source modification
-#endif
-      ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_10); // reset to default
-      currentSource = SOURCE_CAL_10UA;
-      delay(CURRENT_SOURCE_DELAY); // settle after resetting current source
-    }
-
-    // Store the values in arrays
-    adcValues[ch] = avgAdcValue;
-    measuredRValues[ch] = R;
-  }
-#endif
 }
 
 // bool readCalibrationValues() {
@@ -958,7 +1054,7 @@ void configureADS()
 
   // Print averaging configuration
   Serial.print("ADC sampling: ");
-  Serial.print(SAMPLES_PER_CHANNEL);
+  Serial.print(samplingConfig.numSamples);
   Serial.println(" samples per channel (averaged)");
 }
 
@@ -1071,27 +1167,7 @@ float calcADS_R(int32_t adcValue, bool debug, bool allowSourceMod)
   // fix negative, can occur at low R's due to offset
   if (R < 0.0)
   {
-    // Serial.println("R < 0, valid only for small R's.");
     R = 0.0;
-  }
-
-  if (debug)
-  {
-    Serial.print("Voltage Drop (at INA): ");
-    Serial.println(voltageDrop, 3);
-
-    Serial.print("ADC Value: ");
-    Serial.print(adcValue);
-
-    Serial.print("ADC Node (V): ");
-    Serial.println(ADCNode, 6);
-
-    Serial.print("R_eq: ");
-    Serial.println(R_eq, 3);
-
-    Serial.print("R (Ohm)): ");
-    Serial.println(R, 3);
-    Serial.println("");
   }
 
   return R;
@@ -1293,9 +1369,12 @@ void diagnoseMeasurementVariation(int testChannel)
 
 void isolateVariationSource(int testChannel)
 {
+  // Force test channel to 0 since that's our only valid reference
+  testChannel = 0;
+
   Serial.print("=== Variation Source Isolation for Channel ");
   Serial.print(testChannel);
-  Serial.println(" ===");
+  Serial.println(" (Fixed Resistor) ===");
 
   // Set up the test channel
   mux_adc.channel(testChannel);
@@ -1303,40 +1382,48 @@ void isolateVariationSource(int testChannel)
   delay(MUX_DELAY);
 
   const int numTests = 10;
+  const int testDelay = 100; // Consistent delay between all measurements
 
-  Serial.println("\n1. SAME CHANNEL, NO MUX SWITCHING (ADC + Reference stability):");
-  Serial.println("   Tests ADC and reference drift without circuit changes");
-
-  // Test 1: Same channel repeatedly (no MUX changes)
-  int32_t sameChannelReadings[numTests];
+  Serial.println("\n1. RAPID BASELINE TEST (minimal delay):");
+  // Test 1: Same channel with minimal delays
+  int32_t rapidReadings[numTests];
   for (int i = 0; i < numTests; i++)
   {
     ads.sendSTART();
     delay(START_DELAY);
-    sameChannelReadings[i] = ads.readConvertedData(ADCstatus, DIRECT);
-
-    Serial.print("Same Ch ");
+    rapidReadings[i] = ads.readConvertedData(ADCstatus, DIRECT);
+    Serial.print("Rapid ");
     Serial.print(i + 1);
     Serial.print(": ");
-    Serial.println(sameChannelReadings[i]);
-
-    delay(500); // 500ms between readings
+    Serial.println(rapidReadings[i]);
+    delay(testDelay);
   }
 
-  Serial.println("\n2. SWITCH TO DIFFERENT CHANNEL AND BACK (MUX effects):");
-  Serial.println("   Tests if MUX switching introduces variation");
+  Serial.println("\n2. DRIFT BASELINE TEST (500ms delay):");
+  // Test 2: Same channel with longer delays to see drift
+  int32_t driftReadings[numTests];
+  for (int i = 0; i < numTests; i++)
+  {
+    ads.sendSTART();
+    delay(START_DELAY);
+    driftReadings[i] = ads.readConvertedData(ADCstatus, DIRECT);
+    Serial.print("Drift ");
+    Serial.print(i + 1);
+    Serial.print(": ");
+    Serial.println(driftReadings[i]);
+    delay(500); // Longer delay to observe drift
+  }
 
-  // Test 2: Switch to different channel and back
+  Serial.println("\n3. MUX SWITCHING TEST:");
   int32_t muxSwitchReadings[numTests];
   for (int i = 0; i < numTests; i++)
   {
-    // Switch to a different channel temporarily
-    int otherChannel = (testChannel + 1) % 16;
-    mux_adc.channel(otherChannel);
-    mux_cur.channel(otherChannel);
+    // Switch to channel 1 temporarily
+    mux_adc.channel(1);
+    mux_cur.channel(1);
     delay(MUX_DELAY);
 
-    // Switch back to test channel
+    // Switch back to test channel 0
     mux_adc.channel(testChannel);
     mux_cur.channel(testChannel);
     delay(MUX_DELAY);
@@ -1344,28 +1431,21 @@ void isolateVariationSource(int testChannel)
     ads.sendSTART();
     delay(START_DELAY);
     muxSwitchReadings[i] = ads.readConvertedData(ADCstatus, DIRECT);
-
     Serial.print("MUX Switch ");
     Serial.print(i + 1);
     Serial.print(": ");
     Serial.println(muxSwitchReadings[i]);
-
-    delay(500);
+    delay(testDelay);
   }
 
-  Serial.println("\n3. CURRENT SOURCE SWITCHING TEST (10µA stability):");
-  Serial.println("   Tests current source stability and settling");
-
-  // Test 3: Current source switching effects
+  Serial.println("\n4. CURRENT SOURCE SWITCHING TEST:");
   int32_t currentSwitchReadings[numTests];
   for (int i = 0; i < numTests; i++)
   {
-    // Temporarily switch to 50µA and back to 10µA
     ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_50);
     currentSource = SOURCE_CAL_50UA;
     delay(CURRENT_SOURCE_DELAY);
 
-    // Switch back to 10µA
     ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_10);
     currentSource = SOURCE_CAL_10UA;
     delay(CURRENT_SOURCE_DELAY);
@@ -1373,26 +1453,29 @@ void isolateVariationSource(int testChannel)
     ads.sendSTART();
     delay(START_DELAY);
     currentSwitchReadings[i] = ads.readConvertedData(ADCstatus, DIRECT);
-
     Serial.print("Current Switch ");
     Serial.print(i + 1);
     Serial.print(": ");
     Serial.println(currentSwitchReadings[i]);
-
-    delay(200);
+    delay(testDelay);
   }
 
-  // Calculate ranges for comparison
-  int32_t sameChMin = sameChannelReadings[0], sameChMax = sameChannelReadings[0];
+  // Calculate ranges
+  int32_t rapidMin = rapidReadings[0], rapidMax = rapidReadings[0];
+  int32_t driftMin = driftReadings[0], driftMax = driftReadings[0];
   int32_t muxMin = muxSwitchReadings[0], muxMax = muxSwitchReadings[0];
   int32_t currentMin = currentSwitchReadings[0], currentMax = currentSwitchReadings[0];
 
   for (int i = 1; i < numTests; i++)
   {
-    if (sameChannelReadings[i] < sameChMin)
-      sameChMin = sameChannelReadings[i];
-    if (sameChannelReadings[i] > sameChMax)
-      sameChMax = sameChannelReadings[i];
+    if (rapidReadings[i] < rapidMin)
+      rapidMin = rapidReadings[i];
+    if (rapidReadings[i] > rapidMax)
+      rapidMax = rapidReadings[i];
+    if (driftReadings[i] < driftMin)
+      driftMin = driftReadings[i];
+    if (driftReadings[i] > driftMax)
+      driftMax = driftReadings[i];
     if (muxSwitchReadings[i] < muxMin)
       muxMin = muxSwitchReadings[i];
     if (muxSwitchReadings[i] > muxMax)
@@ -1403,10 +1486,14 @@ void isolateVariationSource(int testChannel)
       currentMax = currentSwitchReadings[i];
   }
 
-  Serial.println("\n=== VARIATION SOURCE ANALYSIS ===");
-  Serial.print("Same Channel Range: ");
-  Serial.print(sameChMax - sameChMin);
-  Serial.println(" (ADC + Reference baseline)");
+  Serial.println("\n=== VARIATION ANALYSIS ===");
+  Serial.print("Rapid Sample Range: ");
+  Serial.print(rapidMax - rapidMin);
+  Serial.println(" (minimal delay baseline)");
+
+  Serial.print("Drift Sample Range: ");
+  Serial.print(driftMax - driftMin);
+  Serial.println(" (with 500ms delay)");
 
   Serial.print("MUX Switching Range: ");
   Serial.print(muxMax - muxMin);
@@ -1417,33 +1504,28 @@ void isolateVariationSource(int testChannel)
   Serial.println(" (adds current source effects)");
 
   Serial.println("\n=== INTERPRETATION ===");
-  int32_t baselineVariation = sameChMax - sameChMin;
+  int32_t rapidVariation = rapidMax - rapidMin;
+  int32_t driftVariation = driftMax - driftMin;
   int32_t muxVariation = muxMax - muxMin;
   int32_t currentVariation = currentMax - currentMin;
 
-  if (muxVariation > baselineVariation * 2)
+  if (driftVariation > rapidVariation * 1.5)
   {
-    Serial.println("-> MUX SWITCHING is a major source of variation");
-    Serial.println("   - Increase MUX_DELAY");
-    Serial.println("   - Check MUX power supply stability");
+    Serial.println("-> THERMAL/REFERENCE DRIFT is significant");
+    Serial.println("   - Consider using reference compensation");
+    Serial.println("   - Try to minimize measurement time");
   }
 
-  if (currentVariation > baselineVariation * 2)
+  if (muxVariation > rapidVariation * 1.5)
   {
-    Serial.println("-> CURRENT SOURCE SWITCHING is a major source of variation");
-    Serial.println("   - Increase CURRENT_SOURCE_DELAY");
-    Serial.println("   - Current source may need better stability");
+    Serial.println("-> MUX SWITCHING adds noise");
+    Serial.println("   - Consider increasing MUX_DELAY");
   }
 
-  if (baselineVariation > 500)
+  if (currentVariation > rapidVariation * 1.5)
   {
-    Serial.println("-> ADC/REFERENCE DRIFT is significant");
-    Serial.println("   - ADC internal reference may be drifting");
-    Serial.println("   - Consider external reference or temperature compensation");
-  }
-  else
-  {
-    Serial.println("-> ADC/REFERENCE is relatively stable");
+    Serial.println("-> CURRENT SOURCE SWITCHING adds noise");
+    Serial.println("   - Consider increasing CURRENT_SOURCE_DELAY");
   }
 
   Serial.println("=== END ISOLATION TEST ===\n");
