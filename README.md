@@ -106,9 +106,8 @@ The device uses optimized timing for stability:
 - Channel delay: 2ms
 
 These timings balance measurement speed and accuracy. For best results:
-1. Allow system to warm up for 5 minutes
-2. Use `sample_average=10` or higher for stable readings
-3. Channel 0 has a known reference resistor for drift compensation
+1. Allow system to warm up for 3-5 minutes
+2. Use `sample_average=3` or higher for stable readings (at the expense of longer sampling duration)
 
 ### Charging
 **Important:** The power switch must be ON to charge the battery. This is due to the simple battery switch design utilizing the Arduino's charging module.
@@ -119,5 +118,4 @@ Required library (clone to Arduino/libraries):
 
 ## Hardware Notes
 - The I2C screen is modified with a 3.3V line for battery operation
-- Channel 0 has a precision reference resistor
 - Measurement stability includes thermal and reference drift compensation
