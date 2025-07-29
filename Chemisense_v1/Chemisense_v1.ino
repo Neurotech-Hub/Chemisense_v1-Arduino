@@ -52,6 +52,9 @@ SamplingConfig samplingConfig = {
     .activeChannels = {0}, // All channels inactive
     .numActiveChannels = 0};
 
+// Debug timing flag
+bool debugTiming = true; // Hard-coded for timing analysis
+
 // No legacy commands needed - using new text commands only
 
 #define SEALEVELPRESSURE_HPA (1013.25)
@@ -256,9 +259,22 @@ void parseInitCommand(const char *cmd)
       char *value = token + 14;
       int samples = atoi(value);
 
+      if (debugTiming)
+      {
+        Serial.print("DEBUG: Parsing sample_average=");
+        Serial.print(value);
+        Serial.print(" -> ");
+        Serial.println(samples);
+      }
+
       if (samples > 0 && samples <= 255)
       {
         samplingConfig.numSamples = samples;
+        if (debugTiming)
+        {
+          Serial.print("DEBUG: Set numSamples to ");
+          Serial.println(samplingConfig.numSamples);
+        }
       }
       else
       {
@@ -598,13 +614,36 @@ void loop()
 
     if (elapsed >= samplingConfig.rateLimit)
     {
+      if (debugTiming)
+      {
+        Serial.print("LOOP_START: ");
+        Serial.println(now);
+      }
+
       // Sample all active channels
       bool first = true;
       for (int ch = 0; ch < MAX_CHANNELS; ch++)
       {
         if (samplingConfig.activeChannels[ch])
         {
+          if (debugTiming)
+          {
+            Serial.print("SAMPLE_START_CH");
+            Serial.print(ch);
+            Serial.print(": ");
+            Serial.println(millis());
+          }
+
           sampleChannels(ch, false);
+
+          if (debugTiming)
+          {
+            Serial.print("SAMPLE_END_CH");
+            Serial.print(ch);
+            Serial.print(": ");
+            Serial.println(millis());
+          }
+
           // Output in format: CH:VALUE,CH:VALUE,...
           if (!first)
             Serial.print(",");
@@ -616,6 +655,12 @@ void loop()
       }
       if (!first)
         Serial.println(); // Only print newline if we output something
+
+      if (debugTiming)
+      {
+        Serial.print("LOOP_END: ");
+        Serial.println(millis());
+      }
 
       lastSampleTime = now;
     }
@@ -827,6 +872,13 @@ int getNextFileNumber()
 
 void sampleChannels(int channel, bool doDebug)
 {
+  uint32_t startTime = millis();
+  if (debugTiming)
+  {
+    Serial.print("SAMPLE_FUNC_START: ");
+    Serial.println(startTime);
+  }
+
   // Check if a valid channel is passed (0-15)
   int startChannel = 0;
   int endChannel = 16;
@@ -843,36 +895,95 @@ void sampleChannels(int channel, bool doDebug)
   int validSampleCounts[16] = {0};
 
   // Take numSamples rounds, sampling all channels each round
+  if (debugTiming)
+  {
+    Serial.print("DEBUG: Starting sampling loop with numSamples=");
+    Serial.println(samplingConfig.numSamples);
+  }
+
   for (int sample = 0; sample < samplingConfig.numSamples; sample++)
   {
+    if (debugTiming)
+    {
+      Serial.print("ROUND_START_");
+      Serial.print(sample);
+      Serial.print(": ");
+      Serial.println(millis());
+    }
+
     for (int ch = startChannel; ch < endChannel; ch++)
     {
+      if (debugTiming)
+      {
+        Serial.print("CHANNEL_START_");
+        Serial.print(ch);
+        Serial.print(": ");
+        Serial.println(millis());
+      }
+
       // Set the channel for mux_adc and mux_cur
       mux_adc.channel(ch);
       mux_cur.channel(ch);
       delay(MUX_DELAY);
 
+      if (debugTiming)
+      {
+        Serial.print("MUX_DELAY_END: ");
+        Serial.println(millis());
+      }
+
       ads.sendSTART();
       delay(START_DELAY);
+
+      if (debugTiming)
+      {
+        Serial.print("START_DELAY_END: ");
+        Serial.println(millis());
+      }
 
       int32_t adcValue = ads.readConvertedData(ADCstatus, DIRECT);
       adcSums[ch] += adcValue;
       validSampleCounts[ch]++;
 
+      if (debugTiming)
+      {
+        Serial.print("ADC_READ_END: ");
+        Serial.println(millis());
+      }
+
       // Small delay between channels in same round
       delay(CHANNEL_DELAY_MS);
+
+      if (debugTiming)
+      {
+        Serial.print("CHANNEL_DELAY_END: ");
+        Serial.println(millis());
+      }
     }
 
     // Longer delay between rounds to capture drift
     if (sample < samplingConfig.numSamples - 1)
     {
       delay(ROUND_DELAY_MS);
+      if (debugTiming)
+      {
+        Serial.print("ROUND_DELAY_END: ");
+        Serial.println(millis());
+      }
     }
   }
 
   // Process accumulated samples for each channel
   for (int ch = startChannel; ch < endChannel; ch++)
   {
+    if (debugTiming)
+    {
+      Serial.print("PROCESS_START_CH");
+      Serial.print(ch);
+      Serial.print(": ");
+      Serial.println(millis());
+    }
+
     int32_t avgAdcValue = adcSums[ch] / validSampleCounts[ch];
 
     // Apply reference drift compensation
@@ -887,13 +998,35 @@ void sampleChannels(int channel, bool doDebug)
     int32_t compensatedValue = avgAdcValue;
     float R = calcADS_R(compensatedValue, doDebug, true);
 
+    if (debugTiming)
+    {
+      Serial.print("CALC_R_END_CH");
+      Serial.print(ch);
+      Serial.print(": ");
+      Serial.println(millis());
+    }
+
     // Handle 50µA current source switching if needed
     if (R == -1.0)
     {
+      if (debugTiming)
+      {
+        Serial.print("CURRENT_SWITCH_START_CH");
+        Serial.print(ch);
+        Serial.print(": ");
+        Serial.println(millis());
+      }
+
       // Switch to 50µA and re-sample this channel with time distribution
       ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_50);
       currentSource = SOURCE_CAL_50UA;
       delay(CURRENT_SOURCE_DELAY);
+
+      if (debugTiming)
+      {
+        Serial.print("CURRENT_SWITCH_50UA_END: ");
+        Serial.println(millis());
+      }
 
       // Re-sample this channel with 50µA using time distribution
       long adcSum50ua = 0;
@@ -901,6 +1034,14 @@ void sampleChannels(int channel, bool doDebug)
 
       for (int sample = 0; sample < samplingConfig.numSamples; sample++)
       {
+        if (debugTiming)
+        {
+          Serial.print("RESAMPLE_ROUND_");
+          Serial.print(sample);
+          Serial.print(": ");
+          Serial.println(millis());
+        }
+
         mux_adc.channel(ch);
         mux_cur.channel(ch);
         delay(MUX_DELAY);
@@ -922,15 +1063,41 @@ void sampleChannels(int channel, bool doDebug)
       int32_t compensated50ua = avgAdcValue;
       R = calcADS_R(compensated50ua, doDebug, false);
 
+      if (debugTiming)
+      {
+        Serial.print("RESAMPLE_CALC_END: ");
+        Serial.println(millis());
+      }
+
       // Reset to 10µA
       ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_10);
       currentSource = SOURCE_CAL_10UA;
       delay(CURRENT_SOURCE_DELAY);
+
+      if (debugTiming)
+      {
+        Serial.print("CURRENT_SWITCH_10UA_END: ");
+        Serial.println(millis());
+      }
     }
 
     // Store the values in arrays
     adcValues[ch] = avgAdcValue;
     measuredRValues[ch] = R;
+
+    if (debugTiming)
+    {
+      Serial.print("PROCESS_END_CH");
+      Serial.print(ch);
+      Serial.print(": ");
+      Serial.println(millis());
+    }
+  }
+
+  if (debugTiming)
+  {
+    Serial.print("SAMPLE_FUNC_END: ");
+    Serial.println(millis());
   }
 }
 
