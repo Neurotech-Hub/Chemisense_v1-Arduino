@@ -259,27 +259,21 @@ void parseInitCommand(const char *cmd)
     }
     else if (strncmp(token, "sample_average=", 14) == 0)
     {
-      if (debugTiming)
-      {
-        Serial.print("DEBUG: Full token: '");
-        Serial.print(token);
-        Serial.println("'");
-      }
-
+      // Use strtol for more robust parsing
       char *value = token + 14;
-      int samples = atoi(value);
+      char *endptr;
+      long samples = strtol(value, &endptr, 10);
 
-      if (debugTiming)
+      // Check if parsing was successful
+      if (endptr == value || *endptr != '\0')
       {
-        Serial.print("DEBUG: Parsing sample_average=");
-        Serial.print(value);
-        Serial.print(" -> ");
-        Serial.println(samples);
+        Serial.println("Warning: Invalid sample_average value");
+        samples = 0;
       }
 
       if (samples > 0 && samples <= 255)
       {
-        samplingConfig.numSamples = samples;
+        samplingConfig.numSamples = (uint8_t)samples;
         if (debugTiming)
         {
           Serial.print("DEBUG: Set numSamples to ");
