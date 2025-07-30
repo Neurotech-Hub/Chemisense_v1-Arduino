@@ -259,6 +259,13 @@ void parseInitCommand(const char *cmd)
     }
     else if (strncmp(token, "sample_average=", 14) == 0)
     {
+      if (debugTiming)
+      {
+        Serial.print("DEBUG: Full token: '");
+        Serial.print(token);
+        Serial.println("'");
+      }
+
       char *value = token + 14;
       int samples = atoi(value);
 
