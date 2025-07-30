@@ -112,9 +112,33 @@ These timings balance measurement speed and accuracy. For best results:
 ### Charging
 **Important:** The power switch must be ON to charge the battery. This is due to the simple battery switch design utilizing the Arduino's charging module.
 
-## Custom Dependencies
-Required library (clone to Arduino/libraries):
-- [Neurotech-Hub/ADS124S06-Arduino](https://github.com/Neurotech-Hub/ADS124S06-Arduino)
+## Dependencies
+### Required Libraries
+Install these libraries in your Arduino IDE (Sketch → Include Library → Manage Libraries):
+
+**Core Arduino Libraries (usually pre-installed):**
+- `SPI` - SPI communication
+- `SD` - SD card operations
+- `Wire` - I2C communication
+- `WiFiNINA` - WiFi functionality for MKR WiFi 1010
+
+**Third-Party Libraries:**
+- `ADS124S06` - [Neurotech-Hub/ADS124S06-Arduino](https://github.com/Neurotech-Hub/ADS124S06-Arduino) (clone to Arduino/libraries)
+- `light_CD74HC4067` - CD74HC4067 multiplexer control
+- `Adafruit_Sensor` - Adafruit sensor library
+- `Adafruit_BME680` - BME680 gas sensor library
+- `Adafruit_GFX` - Graphics library for displays
+- `Adafruit_SSD1306` - SSD1306 OLED display library
+- `BQ24195` - Battery management IC library
+
+### Installation Instructions
+1. Open Arduino IDE
+2. Go to **Sketch → Include Library → Manage Libraries**
+3. Search for and install the Adafruit libraries listed above
+4. For the custom ADS124S06 library:
+   - Download from [Neurotech-Hub/ADS124S06-Arduino](https://github.com/Neurotech-Hub/ADS124S06-Arduino)
+   - Extract to your Arduino/libraries folder
+5. For other libraries not in Library Manager, download and install manually
 
 ## Hardware Notes
 - The I2C screen is modified with a 3.3V line for battery operation
