@@ -46,7 +46,7 @@ struct SamplingConfig
 
 // Global sampling configuration
 SamplingConfig samplingConfig = {
-    .numSamples = 10,      // Default to 10 samples
+    .numSamples = 1,       // Default to 10 samples
     .rateLimit = 0,        // Default to fast as possible
     .isRunning = false,    // Start stopped
     .activeChannels = {0}, // All channels inactive
@@ -58,12 +58,12 @@ bool debugTiming = true; // Hard-coded for timing analysis
 // No legacy commands needed - using new text commands only
 
 #define SEALEVELPRESSURE_HPA (1013.25)
-#define MUX_DELAY 50            // ms - increased to reduce MUX switching variability
-#define START_DELAY 15          // ms - balanced for speed vs stability
+#define MUX_DELAY 25            // ms - reduced from 50ms to optimize speed
+#define START_DELAY 8           // ms - reduced from 15ms to optimize speed
 #define CURRENT_SOURCE_DELAY 85 // ms - optimized based on consistent performance
 
 // Sampling Configuration
-#define ROUND_DELAY_MS 25  // ms - reduced to minimize drift effects between rounds
+#define ROUND_DELAY_MS 10  // ms - reduced from 25ms to minimize drift effects between rounds
 #define CHANNEL_DELAY_MS 2 // ms - keeping this minimal delay between channels
 
 // Reference compensation is critical given observed drift
@@ -712,7 +712,7 @@ void loop()
     }
   }
 
-  delay(10);
+  delay(1);
 }
 
 // void input_runCal() {
