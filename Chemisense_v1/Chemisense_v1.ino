@@ -264,6 +264,17 @@ void parseInitCommand(const char *cmd)
       char *endptr;
       long samples = strtol(value, &endptr, 10);
 
+      if (debugTiming)
+      {
+        Serial.print("DEBUG: Parsing '");
+        Serial.print(value);
+        Serial.print("' -> ");
+        Serial.print(samples);
+        Serial.print(", endptr='");
+        Serial.print(*endptr);
+        Serial.println("'");
+      }
+
       // Check if parsing was successful
       if (endptr == value || *endptr != '\0')
       {
