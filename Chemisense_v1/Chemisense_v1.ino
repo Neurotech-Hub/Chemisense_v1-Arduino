@@ -233,13 +233,9 @@ void parseInitCommand(const char *cmd)
   char *token = strtok_r(cmdCopy, ";", &savePtr2);
   while (token != NULL)
   {
-    // Trim leading/trailing spaces
+    // Skip leading spaces only (don't modify the string)
     while (isspace(*token))
       token++;
-    char *end = token + strlen(token) - 1;
-    while (end > token && isspace(*end))
-      end--;
-    *(end + 1) = '\0';
 
     if (debugTiming)
     {
