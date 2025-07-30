@@ -260,7 +260,9 @@ void parseInitCommand(const char *cmd)
     else if (strncmp(token, "sample_average=", 14) == 0)
     {
       // Use strtol for more robust parsing
-      char *value = token + 14;
+      // Find the '=' character and point to what comes after it
+      char *equalsPos = strchr(token, '=');
+      char *value = equalsPos ? equalsPos + 1 : token + 14;
       char *endptr;
       long samples = strtol(value, &endptr, 10);
 
