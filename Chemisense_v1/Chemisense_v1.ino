@@ -53,7 +53,7 @@ SamplingConfig samplingConfig = {
     .numActiveChannels = 0};
 
 // Debug timing flag
-bool debugTiming = true; // Hard-coded for timing analysis
+bool debugTiming = false; // Hard-coded for timing analysis
 
 // No legacy commands needed - using new text commands only
 
