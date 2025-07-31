@@ -288,31 +288,6 @@ Per Measurement Cycle: 21ms × number_of_channels
 #define CHANNEL_DELAY_MS 0  // Eliminate
 ```
 
-#### Testing Strategy
-
-1. **Start with conservative optimization**
-2. **Test with known stable resistors**
-3. **Monitor for measurement drift**
-4. **Gradually reduce delays if stable**
-5. **Use diagnostic commands to verify accuracy**
-
-#### Alternative Approaches
-
-**1. Parallel Sampling (Hardware Modification)**
-- Use multiple ADCs in parallel
-- Eliminates sequential channel switching
-- Requires significant hardware changes
-
-**2. Selective Channel Monitoring**
-- Only sample channels with changing values
-- Implement adaptive sampling rates
-- Requires software intelligence
-
-**3. Interleaved Sampling**
-- Sample different channel groups at different rates
-- Prioritize critical channels
-- Complex but effective for mixed requirements
-
 ### Current Source Switching Optimization (MAJOR IMPACT)
 
 #### Current Source Switching Logic
