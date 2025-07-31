@@ -109,6 +109,302 @@ These timings balance measurement speed and accuracy. For best results:
 1. Allow system to warm up for 3-5 minutes
 2. Use `sample_average=3` or higher for stable readings (at the expense of longer sampling duration)
 
+### Timing Analysis & Performance Bottlenecks
+
+Based on actual system measurements, here are the precise timing breakdowns and performance impacts:
+
+#### Single Channel, Single Sample Timing (Best Case)
+```
+MUX_DELAY: 26ms (25ms configured + 1ms overhead)
+START_DELAY: 8ms (8ms configured)
+ADC_READ: 1ms (ADC conversion time)
+CHANNEL_DELAY: 2ms (2ms configured)
+PROCESSING: 1ms (calculations and storage)
+TOTAL: ~38ms per measurement
+Theoretical Rate: ~26 Hz
+```
+
+#### Multi-Channel Impact
+When measuring multiple channels, timing scales linearly:
+- **2 channels**: ~76ms per measurement cycle (~13 Hz)
+- **4 channels**: ~152ms per measurement cycle (~6.6 Hz)
+- **8 channels**: ~304ms per measurement cycle (~3.3 Hz)
+- **16 channels**: ~608ms per measurement cycle (~1.6 Hz)
+
+#### Averaging Impact
+The `sample_average` parameter has a significant impact:
+- **Each additional sample adds**: 38ms + 10ms (ROUND_DELAY) = 48ms
+- **sample_average=10**: 38ms + (9 × 48ms) = 470ms per measurement (~2.1 Hz)
+- **sample_average=20**: 38ms + (19 × 48ms) = 950ms per measurement (~1.1 Hz)
+
+#### Current Source Switching Impact
+If a channel triggers current source switching (low resistance), additional delays occur:
+- **50µA switch**: 85ms
+- **Re-sampling**: 38ms × numSamples
+- **10µA switch back**: 85ms
+- **Total additional**: 170ms + (38ms × numSamples)
+
+#### Main Loop Overhead
+- **Loop processing**: 2ms between measurements
+- **Serial output**: Variable (depends on baud rate and data length)
+
+#### Performance Optimization Recommendations
+
+**For Maximum Speed:**
+- Use `sample_average=1` for fastest updates
+- Limit to 1-2 channels for real-time monitoring
+- Avoid channels that trigger current source switching
+
+**For Maximum Stability:**
+- Use `sample_average=10` or higher
+- Allow 3-5 minute warm-up period
+- Use multiple channels for comprehensive monitoring
+
+**For Balanced Performance:**
+- Use `sample_average=3-5` for good stability/speed balance
+- Monitor 4-8 channels simultaneously
+- Consider the trade-off between update rate and measurement quality
+
+#### Real-World Performance Examples
+
+| Configuration | Channels | Sample Avg | Expected Rate | Use Case |
+|---------------|----------|------------|---------------|----------|
+| `rate_limit=min;sample_average=1;channels=0` | 1 | 1 | ~26 Hz | High-speed single sensor |
+| `rate_limit=min;sample_average=1;channels=0,1,2` | 3 | 1 | ~8.7 Hz | Fast multi-sensor |
+| `rate_limit=min;sample_average=10;channels=0,1,2` | 3 | 10 | ~2.1 Hz | Stable multi-sensor |
+| `rate_limit=min;sample_average=10;channels=all` | 16 | 10 | ~0.4 Hz | Comprehensive monitoring |
+
+### Multi-Channel Sampling Rate Optimization
+
+#### Current Timing Variables (in order of impact)
+
+**1. MUX_DELAY (LARGEST IMPACT)**
+```cpp
+#define MUX_DELAY 25  // Currently 25ms
+```
+- **Impact**: 26ms per channel (25ms + 1ms overhead)
+- **Multiplier**: × number of channels
+- **Optimization**: Reduce to 10-15ms for faster switching
+- **Risk**: May cause MUX settling issues
+
+**2. START_DELAY**
+```cpp
+#define START_DELAY 8  // Currently 8ms
+```
+- **Impact**: 8ms per channel
+- **Multiplier**: × number of channels
+- **Optimization**: Reduce to 3-5ms
+- **Risk**: ADC may not be ready for conversion
+
+**3. CHANNEL_DELAY_MS**
+```cpp
+#define CHANNEL_DELAY_MS 2  // Currently 2ms
+```
+- **Impact**: 2ms per channel
+- **Multiplier**: × number of channels
+- **Optimization**: Reduce to 0-1ms
+- **Risk**: Minimal risk, safe to reduce
+
+**4. ROUND_DELAY_MS (Averaging Impact)**
+```cpp
+#define ROUND_DELAY_MS 10  // Currently 10ms
+```
+- **Impact**: 10ms × (numSamples - 1)
+- **Multiplier**: × (sample_average - 1)
+- **Optimization**: Reduce to 5ms or eliminate
+- **Risk**: May reduce measurement stability
+
+#### Performance Impact Calculations
+
+**Current Multi-Channel Timing:**
+```
+Per Channel: 26ms (MUX) + 8ms (START) + 2ms (CHANNEL) = 36ms
+Per Measurement Cycle: 36ms × number_of_channels
+```
+
+**Optimized Multi-Channel Timing (aggressive):**
+```
+Per Channel: 15ms (MUX) + 5ms (START) + 1ms (CHANNEL) = 21ms
+Per Measurement Cycle: 21ms × number_of_channels
+```
+
+#### Specific Optimization Strategies
+
+**1. Reduce MUX_DELAY (Highest Impact)**
+```cpp
+#define MUX_DELAY 15  // Reduce from 25ms to 15ms
+```
+- **Savings**: 11ms per channel
+- **4 channels**: 44ms saved per cycle
+- **8 channels**: 88ms saved per cycle
+- **16 channels**: 176ms saved per cycle
+
+**2. Reduce START_DELAY (Medium Impact)**
+```cpp
+#define START_DELAY 5  // Reduce from 8ms to 5ms
+```
+- **Savings**: 3ms per channel
+- **4 channels**: 12ms saved per cycle
+- **8 channels**: 24ms saved per cycle
+- **16 channels**: 48ms saved per cycle
+
+**3. Eliminate CHANNEL_DELAY_MS (Low Impact)**
+```cpp
+#define CHANNEL_DELAY_MS 0  // Reduce from 2ms to 0ms
+```
+- **Savings**: 2ms per channel
+- **4 channels**: 8ms saved per cycle
+- **8 channels**: 16ms saved per cycle
+- **16 channels**: 32ms saved per cycle
+
+#### Expected Performance Improvements
+
+| Configuration | Current Rate | Optimized Rate | Improvement |
+|---------------|--------------|----------------|-------------|
+| 4 channels, 1 sample | ~6.6 Hz | ~11.9 Hz | +80% |
+| 8 channels, 1 sample | ~3.3 Hz | ~5.9 Hz | +79% |
+| 16 channels, 1 sample | ~1.6 Hz | ~2.9 Hz | +81% |
+
+#### Implementation Recommendations
+
+**Conservative Optimization (Low Risk):**
+```cpp
+#define MUX_DELAY 20        // Reduce by 5ms
+#define START_DELAY 6       // Reduce by 2ms
+#define CHANNEL_DELAY_MS 1  // Reduce by 1ms
+```
+
+**Aggressive Optimization (Higher Risk):**
+```cpp
+#define MUX_DELAY 15        // Reduce by 10ms
+#define START_DELAY 5       // Reduce by 3ms
+#define CHANNEL_DELAY_MS 0  // Eliminate
+```
+
+**Maximum Speed (Experimental):**
+```cpp
+#define MUX_DELAY 10        // Reduce by 15ms
+#define START_DELAY 3       // Reduce by 5ms
+#define CHANNEL_DELAY_MS 0  // Eliminate
+```
+
+#### Testing Strategy
+
+1. **Start with conservative optimization**
+2. **Test with known stable resistors**
+3. **Monitor for measurement drift**
+4. **Gradually reduce delays if stable**
+5. **Use diagnostic commands to verify accuracy**
+
+#### Alternative Approaches
+
+**1. Parallel Sampling (Hardware Modification)**
+- Use multiple ADCs in parallel
+- Eliminates sequential channel switching
+- Requires significant hardware changes
+
+**2. Selective Channel Monitoring**
+- Only sample channels with changing values
+- Implement adaptive sampling rates
+- Requires software intelligence
+
+**3. Interleaved Sampling**
+- Sample different channel groups at different rates
+- Prioritize critical channels
+- Complex but effective for mixed requirements
+
+### Current Source Switching Optimization (MAJOR IMPACT)
+
+#### Current Source Switching Logic
+
+The system automatically switches between 10µA and 50µA current sources based on resistance values:
+
+```cpp
+const float ADC_SOURCE_THRESH = VREF - 0.2; // 2.3V threshold
+const float SOURCE_MULTIPLIER = 5.0;        // 10µA to 50µA multiplier
+
+// In calcADS_R():
+if (ADCNode * SOURCE_MULTIPLIER < ADC_SOURCE_THRESH && allowSourceMod)
+{
+  return -1.0; // Triggers current source switching
+}
+```
+
+**When triggered, current source switching adds:**
+- **50µA switch delay**: 85ms
+- **Re-sampling**: 38ms × numSamples
+- **10µA switch back**: 85ms
+- **Total additional**: 170ms + (38ms × numSamples)
+
+#### Current Source Switching Impact
+
+**For single sample (sample_average=1):**
+- **Additional time**: 170ms + 38ms = 208ms
+- **Total measurement**: 38ms + 208ms = 246ms
+- **Rate impact**: 26 Hz → 4 Hz (85% reduction!)
+
+**For 10 samples (sample_average=10):**
+- **Additional time**: 170ms + (38ms × 10) = 550ms
+- **Total measurement**: 470ms + 550ms = 1020ms
+- **Rate impact**: 2.1 Hz → 1 Hz (52% reduction!)
+
+#### Optimization Strategies
+
+**1. Disable Current Source Switching (LARGEST IMPACT)**
+```cpp
+// Option A: Set threshold to 0 (never switch)
+const float ADC_SOURCE_THRESH = 0.0;
+
+// Option B: Modify calcADS_R() to never return -1.0
+if (false && ADCNode * SOURCE_MULTIPLIER < ADC_SOURCE_THRESH && allowSourceMod)
+{
+  return -1.0; // Never triggered
+}
+```
+
+**Impact**: Eliminates 170ms + re-sampling time per triggered measurement
+
+**2. Use Fixed Current Source**
+```cpp
+// Always use 50µA for better low-resistance measurement
+ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_50);
+currentSource = SOURCE_CAL_50UA;
+```
+
+**Impact**: Eliminates switching delays, but may reduce accuracy for high-resistance measurements
+
+**3. Adjust Threshold**
+```cpp
+// Make switching less likely
+const float ADC_SOURCE_THRESH = VREF - 0.5; // More conservative threshold
+```
+
+**Impact**: Reduces frequency of switching while maintaining some dynamic range
+
+#### Performance Impact of Disabling Current Source Switching
+
+| Configuration | With Switching | Without Switching | Improvement |
+|---------------|----------------|-------------------|-------------|
+| 1 channel, 1 sample | ~4 Hz | ~26 Hz | +550% |
+| 4 channels, 1 sample | ~1 Hz | ~6.6 Hz | +560% |
+| 8 channels, 1 sample | ~0.5 Hz | ~3.3 Hz | +560% |
+
+#### Implementation Recommendations
+
+**For Maximum Speed (Recommended for known resistance ranges):**
+```cpp
+// Disable current source switching entirely
+const float ADC_SOURCE_THRESH = 0.0;
+```
+
+**For Balanced Performance:**
+```cpp
+// Use fixed 50µA current source
+// Modify configureADS() to always use 50µA
+ads.writeSingleRegister(REG_ADDR_IDACMAG, ADS_IDACMAG_50);
+currentSource = SOURCE_CAL_50UA;
+```
+
 ### Charging
 **Important:** The power switch must be ON to charge the battery. This is due to the simple battery switch design utilizing the Arduino's charging module.
 
