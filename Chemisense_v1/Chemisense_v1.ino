@@ -127,8 +127,8 @@ uint8_t ADCstatus[1];
 #define STATUS_DRDY_MASK 0x01      // DRDY bit in status register (bit 0)
 
 // float ADC_OFFSET = 0;                        // default, can be overwritten using calibration function
-const float ADC_SOURCE_THRESH = VREF - 0.2; // slightly lower than VREF
-const float SOURCE_MULTIPLIER = 5.0;        // from 10uA to 50uA
+const float ADC_SOURCE_THRESH = 0;   // VREF - 0.2;                                 // slightly lower than VREF
+const float SOURCE_MULTIPLIER = 5.0; // from 10uA to 50uA
 
 bool sdInitialized = false;
 bool error = false;
